@@ -189,6 +189,9 @@ for backend in copilot claude codex; do
   assert_contains "$LOG" "$backend"
   if [ "$backend" = "copilot" ]; then
     assert_not_contains "$LOG" "--remote"
+    assert_contains "$LOG" "env COPILOT_TASK_WAIT_TIMEOUT_SECONDS='3600' copilot"
+  else
+    assert_contains "$LOG" "env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS $backend"
   fi
   if [ "$backend" = "codex" ]; then
     assert_not_contains "$LOG" "resume --last"
@@ -206,7 +209,7 @@ done
 reset_tmux
 mkdir -p "$COPILOT_BASE/agent-alpha"
 printf '%s\n' "$COPILOT_BASE/agent-alpha" > "$STATE_DIR/sessions/alpha"
-run_agent "$BIN_DIR/agent-stack" copilot alpha
+COPILOT_TASK_WAIT_TIMEOUT_SECONDS=invalid run_agent "$BIN_DIR/agent-stack" copilot alpha
 assert_contains "$LOG" "switch-client|-t =alpha"
 
 reset_tmux
@@ -336,6 +339,38 @@ printf '{"type":"session_meta","payload":{"cwd":"%s"}}\n' \
   "$CODEX_BASE/agent-alpha" > "$HOME_DIR/.codex/sessions/2026/08/02/rollout.jsonl"
 run_agent "$BIN_DIR/agent-stack" codex alpha
 assert_contains "$LOG" "codex resume --last"
+
+reset_tmux
+mkdir -p "$TMP/config/remote-agent-stack"
+cat > "$TMP/config/remote-agent-stack/config" <<'EOF'
+COPILOT_TASK_WAIT_TIMEOUT_SECONDS="1200"
+EOF
+run_agent "$BIN_DIR/agent-stack" copilot timeout-config
+assert_contains "$LOG" "env COPILOT_TASK_WAIT_TIMEOUT_SECONDS='1200' copilot"
+
+reset_tmux
+COPILOT_TASK_WAIT_TIMEOUT_SECONDS=1800 \
+  run_agent "$BIN_DIR/agent-stack" copilot timeout-override
+assert_contains "$LOG" "env COPILOT_TASK_WAIT_TIMEOUT_SECONDS='1800' copilot"
+
+reset_tmux
+COPILOT_TASK_WAIT_TIMEOUT_SECONDS= \
+  assert_fails_with 2 "$BIN_DIR/agent-stack" copilot timeout-empty
+assert_contains "$TMP/stderr" "COPILOT_TASK_WAIT_TIMEOUT_SECONDS must be a positive integer"
+[ ! -s "$LOG" ]
+
+reset_tmux
+COPILOT_TASK_WAIT_TIMEOUT_SECONDS=invalid \
+  assert_fails_with 2 "$BIN_DIR/agent-stack" copilot timeout-invalid
+assert_contains "$TMP/stderr" "COPILOT_TASK_WAIT_TIMEOUT_SECONDS must be a positive integer"
+[ ! -s "$LOG" ]
+
+reset_tmux
+COPILOT_TASK_WAIT_TIMEOUT_SECONDS=00 \
+  assert_fails_with 2 "$BIN_DIR/agent-stack" copilot timeout-zero
+assert_contains "$TMP/stderr" "COPILOT_TASK_WAIT_TIMEOUT_SECONDS must be a positive integer"
+[ ! -s "$LOG" ]
+rm -f "$TMP/config/remote-agent-stack/config"
 
 for backend in copilot claude codex; do
   reset_tmux

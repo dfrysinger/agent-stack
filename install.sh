@@ -852,10 +852,54 @@ _read_config_var() {
   }' "$CONFIG_DIR/config" 2>/dev/null || true
 }
 
+_read_config_positive_integer() {
+  local var="$1"
+  [ -f "$CONFIG_DIR/config" ] || return 0
+  python3 - "$CONFIG_DIR/config" "$var" <<'PY'
+import re
+import shlex
+import sys
+
+path, name = sys.argv[1:]
+assignment = re.compile(rf"^\s*(?:export\s+)?{re.escape(name)}\s*=(.*)$")
+with open(path, encoding="utf-8", errors="replace") as stream:
+    for line in stream:
+        match = assignment.match(line)
+        if match is None:
+            continue
+        lexer = shlex.shlex(match.group(1), posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        try:
+            tokens = list(lexer)
+        except ValueError:
+            break
+        if len(tokens) == 1:
+            print(tokens[0])
+        break
+PY
+}
+
 EXISTING_COPILOT_WORKSPACE_BASE="$(_read_config_var COPILOT_WORKSPACE_BASE)"
 EXISTING_CLAUDE_WORKSPACE_BASE="$(_read_config_var CLAUDE_WORKSPACE_BASE)"
 EXISTING_CODEX_WORKSPACE_BASE="$(_read_config_var CODEX_WORKSPACE_BASE)"
 EXISTING_LEGACY_WORKSPACE_BASE="$(_read_config_var WORKSPACE_BASE)"
+EXISTING_COPILOT_TASK_WAIT_TIMEOUT_SECONDS="$(
+  _read_config_positive_integer COPILOT_TASK_WAIT_TIMEOUT_SECONDS
+)"
+
+COPILOT_TASK_WAIT_TIMEOUT_SECONDS_RESOLVED="${EXISTING_COPILOT_TASK_WAIT_TIMEOUT_SECONDS:-3600}"
+case "$COPILOT_TASK_WAIT_TIMEOUT_SECONDS_RESOLVED" in
+  *[!0-9]*|"")
+    warn "invalid COPILOT_TASK_WAIT_TIMEOUT_SECONDS; using 3600"
+    COPILOT_TASK_WAIT_TIMEOUT_SECONDS_RESOLVED=3600
+    ;;
+  *[1-9]*) ;;
+  *)
+    warn "invalid COPILOT_TASK_WAIT_TIMEOUT_SECONDS; using 3600"
+    COPILOT_TASK_WAIT_TIMEOUT_SECONDS_RESOLVED=3600
+    ;;
+esac
 
 if [ -z "$EXISTING_COPILOT_WORKSPACE_BASE" ] && [ -n "$EXISTING_LEGACY_WORKSPACE_BASE" ]; then
   EXISTING_COPILOT_WORKSPACE_BASE="$EXISTING_LEGACY_WORKSPACE_BASE"
@@ -1049,6 +1093,10 @@ CODEX_WORKSPACE_BASE="$CODEX_WORKSPACE_BASE_RESOLVED"
 # AGENT_DIR_PREFIX: prefix for per-agent working directories under each
 # backend's workspace root. Uncomment to override.
 # AGENT_DIR_PREFIX="agent-"
+
+# Maximum time Copilot waits for background shells and agents before ending an
+# autopilot turn. Agent Stack uses one hour for long-running sessions.
+COPILOT_TASK_WAIT_TIMEOUT_SECONDS="$COPILOT_TASK_WAIT_TIMEOUT_SECONDS_RESOLVED"
 
 # MAILBOX_INTEGRATION: enable cross-session message/file handoff via the
 # optional dfrysinger-skills \`mailbox\` skill. When "true", the wrapper

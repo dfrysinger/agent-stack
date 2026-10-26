@@ -690,6 +690,7 @@ CLAUDE_WORKSPACE_BASE="/Users/you/.../Dropbox/claude-workspace"    # set during 
 CODEX_WORKSPACE_BASE="/Users/you/.../Dropbox/codex-workspace"      # set during install
 MAILBOX_INTEGRATION="false"                                        # off by default
 ALLOW_ALL="false"                                                  # off by default
+COPILOT_TASK_WAIT_TIMEOUT_SECONDS="3600"                           # one hour
 AGENT_HELP_CLIS="copilot,claude,codex"                             # complete desired set
 SCREEN_SHARING_PORT="15900"                                        # Tailscale TCP forward
 DESK_DISPLAY_COUNT="3"                                             # legacy compatibility setting
@@ -720,6 +721,12 @@ launch — Copilot: `--allow-all` (auto-approves tools, paths, URLs);
 Claude Code: `--dangerously-skip-permissions`; Codex:
 `--dangerously-bypass-approvals-and-sandbox`. Personal-machine
 convenience; do not enable in shared environments.
+
+`COPILOT_TASK_WAIT_TIMEOUT_SECONDS` controls how long Copilot waits for
+background shells and agents before it ends an autopilot turn. Agent Stack
+uses 3600 seconds because its named agents often run unattended work that
+outlasts Copilot's shorter default. Set another positive number to change the
+limit. The setting affects Copilot only.
 
 `SESSION_WARN_MB` (Copilot only) is the size at which the wrapper offers to
 retire an agent's session and start a fresh one. Copilot replays a
