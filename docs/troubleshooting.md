@@ -131,6 +131,32 @@ Either way the conversation comes back; tmux scrollback is gone.
 
 ## Backend CLIs
 
+### Slow startup before Copilot opens
+
+The launcher scans `workspace.yaml` metadata to choose the session to resume.
+It checks every session file for changes and reuses cached metadata when the
+file is unchanged. New or changed files are read with eight parallel readers.
+The first scan builds the cache; later scans report how many entries were
+reused, read, or skipped, along with elapsed time. Longer scans report progress
+about every two seconds as work completes. Disk contention and system load can
+still increase lookup time.
+
+Sessions with recorded work take priority over empty sessions; the most recently
+updated session in that group wins. The retirement list is read on each launch.
+The cache never stores a winning session ID.
+
+The disposable cache is
+`${XDG_CACHE_HOME:-$HOME/.cache}/remote-agent-stack/copilot-sessions-v1.json`.
+Remove that one file to force a full metadata read on the next launch.
+Missing or invalid caches are rebuilt automatically. If the cache cannot be
+saved, the launcher uses fresh metadata without blocking startup. If metadata
+keeps changing during a read, it falls back to an uncached scan and does not
+publish that snapshot. No background service is required.
+
+The next message identifies the login-keychain unlock step. If a password
+prompt appears there, enter the login-keychain password in that terminal.
+This wait is separate from session lookup and Copilot startup.
+
 ### Copilot: "store token in plain text config file?" on every launch
 
 Answer "Yes". Reasoning: the Copilot CLI defaults to the macOS keychain,
@@ -148,12 +174,14 @@ subsequent launches reuse it. If auth silently fails, the most common
 cause is the same PATH issue as Copilot below — `claude` isn't on the
 non-login shell's PATH.
 
-### Backend binary exits immediately with no UI (`copilot --remote` or `claude`)
+### Backend binary exits immediately with no UI (`copilot` or `claude`)
 
-For Copilot, `--remote` is correct (we tried `--remote on` first;
-that's a different mode). The most common cause for either backend is
-the binary not being on PATH inside tmux. Sanity check from inside an
-active tmux session:
+If Copilot reports an unsupported `--remote` option, update the Agent Stack
+launcher. It launches Copilot with `--session-id` and does not require a
+remote-control flag.
+
+For either backend, check that the binary is on PATH inside tmux. Run these
+commands from an active tmux session:
 
 ```bash
 which copilot   # or: which claude
