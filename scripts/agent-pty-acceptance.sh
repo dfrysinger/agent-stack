@@ -30,7 +30,8 @@ ln -s "$REAL_TMUX" "$BIN_DIR/tmux"
 for backend in copilot claude codex; do
   cat > "$BIN_DIR/$backend" <<EOF
 #!/usr/bin/env bash
-printf '$backend|%s|%s\n' "\$PWD" "\$*" >> "\$ACCEPT_LOG"
+printf '$backend|%s|%s|%s\n' "\$PWD" "\$*" \
+  "\${COPILOT_TASK_WAIT_TIMEOUT_SECONDS:-}" >> "\$ACCEPT_LOG"
 session="\$(tmux display-message -p '#S')"
 tmux kill-session -t "=\$session"
 EOF
@@ -61,15 +62,32 @@ run_candidate() {
 
 for backend in copilot claude codex; do
   : > "$LOG"
-  run_candidate "$BIN_DIR/agent-stack" "$backend" pty
+  if [ "$backend" = "copilot" ]; then
+    run_candidate "$BIN_DIR/agent-stack" "$backend" pty
+  else
+    COPILOT_TASK_WAIT_TIMEOUT_SECONDS=900 \
+      run_candidate "$BIN_DIR/agent-stack" "$backend" pty
+  fi
   canonical="$(cat "$LOG")"
-  case "$canonical" in
-    "$backend|$TMP/$backend-workspace/agent-pty|"*) ;;
-    *) echo "unexpected canonical launch: $canonical" >&2; exit 1 ;;
-  esac
+  if [ "$backend" = "copilot" ]; then
+    case "$canonical" in
+      "copilot|$TMP/copilot-workspace/agent-pty|"*"|3600") ;;
+      *) echo "unexpected canonical launch: $canonical" >&2; exit 1 ;;
+    esac
+  else
+    case "$canonical" in
+      "$backend|$TMP/$backend-workspace/agent-pty|"*"|") ;;
+      *) echo "unexpected canonical launch: $canonical" >&2; exit 1 ;;
+    esac
+  fi
 
   : > "$LOG"
-  run_candidate "$BIN_DIR/$backend-agent" pty
+  if [ "$backend" = "copilot" ]; then
+    run_candidate "$BIN_DIR/$backend-agent" pty
+  else
+    COPILOT_TASK_WAIT_TIMEOUT_SECONDS=900 \
+      run_candidate "$BIN_DIR/$backend-agent" pty
+  fi
   alias_launch="$(cat "$LOG")"
   [ "$alias_launch" = "$canonical" ] || {
     echo "$backend alias launch differs from canonical launch" >&2

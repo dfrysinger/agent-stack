@@ -18,6 +18,8 @@
 #   CLAUDE_BIN               default: claude
 #   CODEX_BIN                default: codex
 #   AGENT_DIR_PREFIX         default: agent-
+#   COPILOT_TASK_WAIT_TIMEOUT_SECONDS
+#                            default: 3600
 #   ALLOW_ALL                default: false
 #     copilot: --allow-all
 #     claude : --dangerously-skip-permissions
@@ -67,7 +69,7 @@ Config:
   ~/.config/remote-agent-stack/config
   Env: COPILOT_WORKSPACE_BASE, CLAUDE_WORKSPACE_BASE, CODEX_WORKSPACE_BASE,
        COPILOT_BIN, CLAUDE_BIN, CODEX_BIN, AGENT_DIR_PREFIX, ALLOW_ALL,
-       MAILBOX_INTEGRATION
+       MAILBOX_INTEGRATION, COPILOT_TASK_WAIT_TIMEOUT_SECONDS
 USAGE
 }
 
@@ -128,9 +130,19 @@ NAME="$1"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/remote-agent-stack"
 CONFIG_FILE="$CONFIG_DIR/config"
 
+COPILOT_TASK_WAIT_TIMEOUT_SECONDS_FROM_ENV=false
+if [ "${COPILOT_TASK_WAIT_TIMEOUT_SECONDS+x}" = "x" ]; then
+  COPILOT_TASK_WAIT_TIMEOUT_SECONDS_FROM_ENV=true
+  COPILOT_TASK_WAIT_TIMEOUT_SECONDS_ENV="$COPILOT_TASK_WAIT_TIMEOUT_SECONDS"
+fi
+
 if [ -f "$CONFIG_FILE" ]; then
   # shellcheck source=/dev/null
   . "$CONFIG_FILE"
+fi
+
+if [ "$COPILOT_TASK_WAIT_TIMEOUT_SECONDS_FROM_ENV" = "true" ]; then
+  COPILOT_TASK_WAIT_TIMEOUT_SECONDS="$COPILOT_TASK_WAIT_TIMEOUT_SECONDS_ENV"
 fi
 
 # Pre-Claude installs used WORKSPACE_BASE for Copilot. Preserve that value so
@@ -147,6 +159,7 @@ fi
 : "${CODEX_BIN:=codex}"
 : "${AGENT_DIR_PREFIX:=agent-}"
 : "${SESSION_WARN_MB:=300}"
+: "${COPILOT_TASK_WAIT_TIMEOUT_SECONDS=3600}"
 
 case "$BACKEND" in
   copilot)
@@ -308,6 +321,20 @@ if tmux has-session -t "=$SESSION" 2>/dev/null; then
 fi
 
 # ---- new session -----------------------------------------------------------
+
+if [ "$BACKEND" = "copilot" ]; then
+  case "$COPILOT_TASK_WAIT_TIMEOUT_SECONDS" in
+    *[!0-9]*|"")
+      echo "COPILOT_TASK_WAIT_TIMEOUT_SECONDS must be a positive integer." >&2
+      exit 2
+      ;;
+    *[1-9]*) ;;
+    *)
+      echo "COPILOT_TASK_WAIT_TIMEOUT_SECONDS must be a positive integer." >&2
+      exit 2
+      ;;
+  esac
+fi
 
 # ---- build backend-specific launch command --------------------------------
 
@@ -570,7 +597,7 @@ PY
     # is only a cosmetic label on the session anyway. Resume never relies on it
     # — the scan above keys on `cwd`, not `name`, precisely because Copilot's
     # auto-summarizer rewrites session names in place.
-    CMD="$AGENT_BIN --session-id='$UUID'"
+    CMD="env COPILOT_TASK_WAIT_TIMEOUT_SECONDS='$COPILOT_TASK_WAIT_TIMEOUT_SECONDS' $AGENT_BIN --session-id='$UUID'"
     if [ "${ALLOW_ALL:-false}" = "true" ]; then
       CMD="$CMD --allow-all"
     fi
@@ -592,7 +619,7 @@ PY
       done
     fi
 
-    CMD="$AGENT_BIN"
+    CMD="env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS $AGENT_BIN"
     if [ "$HAS_SESSION" = "true" ]; then
       CMD="$CMD --continue"
     fi
@@ -633,7 +660,7 @@ PY
       HAS_SESSION=true
     fi
 
-    CMD="$AGENT_BIN"
+    CMD="env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS $AGENT_BIN"
     if [ "$HAS_SESSION" = "true" ]; then
       CMD="$CMD resume --last"
     fi
