@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-WRAPPER="$ROOT/bin/agent"
+WRAPPER="${WRAPPER:-$ROOT/bin/agent}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -96,6 +96,7 @@ run_agent() {
   env -u TMUX \
     HOME="$HOME_DIR" \
     XDG_CONFIG_HOME="$TMP/config" \
+    XDG_CACHE_HOME="$TMP/cache" \
     PATH="$BIN_DIR:/usr/bin:/bin" \
     TMUX="fake" \
     FAKE_TMUX_STATE="$STATE_DIR" \
@@ -112,6 +113,7 @@ run_agent_without_tmux() {
   env -u TMUX \
     HOME="$HOME_DIR" \
     XDG_CONFIG_HOME="$TMP/config" \
+    XDG_CACHE_HOME="$TMP/cache" \
     PATH="$BIN_DIR:/usr/bin:/bin" \
     FAKE_TMUX_STATE="$STATE_DIR" \
     FAKE_TMUX_LOG="$LOG" \
@@ -185,6 +187,9 @@ for backend in copilot claude codex; do
   [ "$backend" = "copilot" ] && expected_session="alpha"
   assert_contains "$LOG" "new-session|$expected_session|$TMP/$backend-workspace/agent-alpha"
   assert_contains "$LOG" "$backend"
+  if [ "$backend" = "copilot" ]; then
+    assert_not_contains "$LOG" "--remote"
+  fi
   if [ "$backend" = "codex" ]; then
     assert_not_contains "$LOG" "resume --last"
   fi
@@ -246,14 +251,63 @@ cwd: $COPILOT_BASE/agent-selected
 updated_at: 2026-08-02T10:00:00Z
 summary_count: 2
 EOF
+run_agent "$BIN_DIR/agent-stack" copilot selected >"$TMP/stdout" 2>"$TMP/stderr"
+assert_contains "$LOG" "--session-id='11111111-1111-1111-1111-111111111111'"
+assert_not_contains "$LOG" "--remote"
+assert_contains "$TMP/stderr" "Scanning Copilot session metadata"
+assert_contains "$TMP/stderr" "Session scan complete"
+assert_not_contains "$TMP/stdout" "Scanning"
+
+reset_tmux
+run_agent "$BIN_DIR/agent-stack" copilot selected >"$TMP/stdout" 2>"$TMP/stderr"
+assert_contains "$LOG" "--session-id='11111111-1111-1111-1111-111111111111'"
+assert_contains "$TMP/stderr" "1 reused, 0 read"
+[ -f "$TMP/cache/remote-agent-stack/copilot-sessions-v1.json" ]
+
+write_copilot_session() {
+  mkdir -p "$HOME_DIR/.copilot/session-state/$1"
+  printf 'id: %s\ncwd: %s\nupdated_at: %s\nsummary_count: %s\n' \
+    "$2" "$3" "$4" "$5" > "$HOME_DIR/.copilot/session-state/$1/workspace.yaml"
+}
+
+write_copilot_session real-new 22222222-2222-2222-2222-222222222222 \
+  "$COPILOT_BASE/agent-selected" 2026-08-03T10:00:00Z 1
+write_copilot_session retired 33333333-3333-3333-3333-333333333333 \
+  "$COPILOT_BASE/agent-selected" 2026-08-04T10:00:00Z 3
+write_copilot_session empty-new 44444444-4444-4444-4444-444444444444 \
+  "$COPILOT_BASE/agent-selected" 2026-08-05T10:00:00Z 0
+write_copilot_session other-workspace 55555555-5555-5555-5555-555555555555 \
+  "$COPILOT_BASE/agent-other" 2026-08-06T10:00:00Z 9
+printf '%s\n' 33333333-3333-3333-3333-333333333333 > "$COPILOT_BASE/agent-selected/.ca-retired-sessions"
+mkdir -p "$HOME_DIR/.copilot/session-state/missing-metadata"
+reset_tmux
+run_agent "$BIN_DIR/agent-stack" copilot selected
+assert_contains "$LOG" "--session-id='22222222-2222-2222-2222-222222222222'"
+
+printf '%s\n' 22222222-2222-2222-2222-222222222222 >> "$COPILOT_BASE/agent-selected/.ca-retired-sessions"
+reset_tmux
 run_agent "$BIN_DIR/agent-stack" copilot selected
 assert_contains "$LOG" "--session-id='11111111-1111-1111-1111-111111111111'"
+
+printf '%s\n' 11111111-1111-1111-1111-111111111111 >> "$COPILOT_BASE/agent-selected/.ca-retired-sessions"
+reset_tmux
+run_agent "$BIN_DIR/agent-stack" copilot selected
+assert_contains "$LOG" "--session-id='44444444-4444-4444-4444-444444444444'"
+
+write_copilot_session tie-a 66666666-6666-6666-6666-666666666666 \
+  "$COPILOT_BASE/agent-selected" 2026-08-07T10:00:00Z 1
+write_copilot_session tie-z 77777777-7777-7777-7777-777777777777 \
+  "$COPILOT_BASE/agent-selected" 2026-08-07T10:00:00Z 1
+reset_tmux
+run_agent "$BIN_DIR/agent-stack" copilot selected
+assert_contains "$LOG" "--session-id='66666666-6666-6666-6666-666666666666'"
 
 reset_tmux
 mkdir -p "$HOME_DIR/Library/Keychains"
 touch "$HOME_DIR/Library/Keychains/login.keychain-db"
-run_agent "$BIN_DIR/agent-stack" copilot keychain
+run_agent "$BIN_DIR/agent-stack" copilot keychain >"$TMP/stdout" 2>"$TMP/stderr"
 assert_contains "$AUX_LOG" "security|unlock-keychain"
+assert_contains "$TMP/stderr" "Unlocking the login keychain"
 
 reset_tmux
 MAILBOX_DIR="$HOME_DIR/.copilot/installed-plugins/_direct/dfrysinger--skills/skills/mailbox/scripts"
