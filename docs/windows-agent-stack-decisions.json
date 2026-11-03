@@ -1,0 +1,42 @@
+{
+  "revision": "windows-agent-stack-decisions-v1",
+  "events": [
+    {
+      "event_id": "user-2026-11-02-windows-three-backends",
+      "question": "Should Agent Stack support GitHub Copilot CLI, Claude Code, and Codex CLI on this Windows machine?",
+      "recommended_answer": "Yes. Extend the existing three-backend Agent Stack contract instead of creating a separate Windows-only product.",
+      "user_answer": "hi can you get my agent-stack working with codex and claude code on this machine?",
+      "context": "The user asked for the existing Agent Stack product to work with its two missing backends on the current Windows computer.",
+      "authority": "top-level user outcome",
+      "resolved": true
+    },
+    {
+      "event_id": "user-2026-11-02-native-windows",
+      "question": "Should the port run natively on Windows and build on the working Windows Copilot launcher?",
+      "recommended_answer": "Yes. Use PowerShell and Windows command entry points, preserve the working Copilot identity contract, and do not require WSL or tmux.",
+      "user_answer": "yes I want it working on windows fully, we already have copilot-agent scripts working on here right?",
+      "context": "The user confirmed the operating-system target after the working deterministic Copilot launcher was identified.",
+      "authority": "top-level scope and compatibility requirement",
+      "resolved": true
+    },
+    {
+      "event_id": "user-2026-11-02-design-and-execute",
+      "question": "Should this run stop after design, or continue through implementation and proof?",
+      "recommended_answer": "Write and review the design, then use development-loop and unattended-run to implement and prove the Windows port.",
+      "user_answer": "get a design doc written and use development loop and unattended run to execute on the windows port of the agent-stack tools",
+      "context": "The user set the native autopilot objective for this session.",
+      "authority": "top-level execution instruction",
+      "resolved": true
+    },
+    {
+      "event_id": "assumption-2026-11-02-live-process-persistence",
+      "question": "Must closing the terminal leave the agent process running so a later command reattaches to the same live TUI?",
+      "recommended_answer": "Do not add a Windows process supervisor in this port. Preserve each provider's durable conversation and workspace so relaunch resumes the named agent after process exit. Revisit live TUI persistence as a separate product change.",
+      "user_answer": "",
+      "context": "The question was asked but not answered before the user replaced the active objective with an autonomous design-and-execute instruction. The earlier selected direction was a native provider launcher using each CLI's resume behavior, and no WSL or tmux is installed.",
+      "authority": "implementation assumption constrained by the selected architecture; not a direct user decision",
+      "resolved": false,
+      "unresolved_decision": "Live TUI persistence is excluded from this port unless repository evidence or the independent design challenge shows it is necessary to satisfy the existing Agent Stack command contract."
+    }
+  ]
+}
