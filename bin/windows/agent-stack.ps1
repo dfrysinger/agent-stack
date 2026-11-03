@@ -235,6 +235,313 @@ function Resolve-MailboxScript {
     ) 1
 }
 
+    function Initialize-JobObjectNativeMethods {
+        if ($null -ne ("AgentStack.JobNativeMethods" -as [type])) {
+            return
+        }
+        [void](Add-Type -TypeDefinition @'
+    using System;
+    using System.Diagnostics;
+    using System.Runtime.InteropServices;
+    using System.Text;
+
+    namespace AgentStack {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct IO_COUNTERS {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+            public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+            public IO_COUNTERS IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        public static class JobNativeMethods {
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            public static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            public static extern bool SetInformationJobObject(
+                IntPtr job,
+                int infoClass,
+                IntPtr info,
+                uint length
+            );
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            public static extern bool AssignProcessToJobObject(
+                IntPtr job,
+                IntPtr process
+            );
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            public static extern bool TerminateJobObject(
+                IntPtr job,
+                uint exitCode
+            );
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            public static extern bool CloseHandle(IntPtr handle);
+        }
+
+        public sealed class ProcessOutputCollector {
+            private readonly StringBuilder stderr = new StringBuilder();
+
+            public void Attach(Process process) {
+                process.OutputDataReceived += (_, __) => { };
+                process.ErrorDataReceived += (_, args) => {
+                    if (args.Data == null) return;
+                    lock (stderr) {
+                        stderr.AppendLine(args.Data);
+                    }
+                };
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+            }
+
+            public string ErrorText() {
+                lock (stderr) {
+                    return stderr.ToString();
+                }
+            }
+        }
+    }
+'@)
+    }
+
+    function New-KillOnCloseJob {
+        Initialize-JobObjectNativeMethods
+        $job = [AgentStack.JobNativeMethods]::CreateJobObject([IntPtr]::Zero, $null)
+        if ($job -eq [IntPtr]::Zero) {
+            throw "Cannot create Codex process Job Object: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+        }
+        $basic = New-Object AgentStack.JOBOBJECT_BASIC_LIMIT_INFORMATION
+        $basic.LimitFlags = 0x00002000
+        $information = New-Object AgentStack.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        $information.BasicLimitInformation = $basic
+        $size = [Runtime.InteropServices.Marshal]::SizeOf($information)
+        $pointer = [Runtime.InteropServices.Marshal]::AllocHGlobal($size)
+        try {
+            [Runtime.InteropServices.Marshal]::StructureToPtr(
+                $information,
+                $pointer,
+                $false
+            )
+            if (-not [AgentStack.JobNativeMethods]::SetInformationJobObject(
+                $job,
+                9,
+                $pointer,
+                $size
+            )) {
+                throw "Cannot configure Codex process Job Object: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+            }
+        } catch {
+            [void][AgentStack.JobNativeMethods]::CloseHandle($job)
+            throw
+        } finally {
+            [Runtime.InteropServices.Marshal]::FreeHGlobal($pointer)
+        }
+        return $job
+    }
+
+    function Close-JobObject {
+        param([IntPtr]$Job)
+
+        if ($Job -ne [IntPtr]::Zero) {
+            [void][AgentStack.JobNativeMethods]::TerminateJobObject($Job, 1)
+            return [AgentStack.JobNativeMethods]::CloseHandle($Job)
+        }
+        return $true
+    }
+
+    function Start-JobProcess {
+        param(
+            [Parameter(Mandatory = $true)][IntPtr]$Job,
+            [Parameter(Mandatory = $true)][string]$FilePath,
+            [Parameter(Mandatory = $true)][string[]]$Arguments,
+            [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+            [hashtable]$Environment = @{},
+            [switch]$Background
+        )
+
+        $startInfo = New-Object Diagnostics.ProcessStartInfo
+        $startInfo.UseShellExecute = $false
+        $startInfo.WorkingDirectory = $WorkingDirectory
+        $startInfo.CreateNoWindow = [bool]$Background
+        $startInfo.FileName = $FilePath
+        foreach ($argument in $Arguments) {
+            [void]$startInfo.ArgumentList.Add($argument)
+        }
+        foreach ($entry in $Environment.GetEnumerator()) {
+            $startInfo.Environment[$entry.Key] = [string]$entry.Value
+        }
+        if ($Background) {
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+        }
+
+        $process = New-Object Diagnostics.Process
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) {
+            throw "Failed to start managed process: $FilePath"
+        }
+        if (-not [AgentStack.JobNativeMethods]::AssignProcessToJobObject(
+            $Job,
+            $process.Handle
+        )) {
+            try {
+                $process.Kill($true)
+            } catch {}
+            throw "Cannot assign managed process to Codex Job Object: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+        }
+        if ($Background) {
+            $collector = New-Object AgentStack.ProcessOutputCollector
+            $collector.Attach($process)
+            $process | Add-Member -NotePropertyName AgentStackOutput -NotePropertyValue $collector
+        }
+        return $process
+    }
+
+    function Get-AvailableLoopbackPort {
+        $listener = [Net.Sockets.TcpListener]::new(
+            [Net.IPAddress]::Loopback,
+            0
+        )
+        try {
+            $listener.Start()
+            return ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+        } finally {
+            $listener.Stop()
+        }
+    }
+
+    function Get-ManagedProcessError {
+        param([Parameter(Mandatory = $true)][Diagnostics.Process]$Process)
+
+        $detail = [string]$Process.AgentStackOutput.ErrorText()
+        $detail = $detail.Trim()
+        if ($detail.Length -gt 500) {
+            return $detail.Substring($detail.Length - 500)
+        }
+        return $detail
+    }
+
+    function Test-ProcessDescendsFrom {
+        param(
+            [Parameter(Mandatory = $true)][int]$ProcessId,
+            [Parameter(Mandatory = $true)][int]$AncestorId
+        )
+
+        $seen = New-Object Collections.Generic.HashSet[int]
+        $current = $ProcessId
+        while ($current -gt 0 -and $seen.Add($current)) {
+            if ($current -eq $AncestorId) {
+                return $true
+            }
+            $record = Get-CimInstance Win32_Process -Filter "ProcessId=$current" `
+                -ErrorAction SilentlyContinue
+            if ($null -eq $record) {
+                return $false
+            }
+            $current = [int]$record.ParentProcessId
+        }
+        return $false
+    }
+
+    function Wait-ManagedLoopbackEndpoint {
+        param(
+            [Parameter(Mandatory = $true)][int]$Port,
+            [Parameter(Mandatory = $true)][Diagnostics.Process]$Process
+        )
+
+        $deadline = [DateTime]::UtcNow.AddSeconds(15)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            if ($Process.HasExited) {
+                $detail = Get-ManagedProcessError $Process
+                throw (
+                    "Codex app-server exited before accepting connections; " +
+                    "upgrade Codex if this version lacks authenticated remote support." +
+                    $(if ($detail) { " $detail" } else { "" })
+                )
+            }
+            $listeners = @(
+                Get-NetTCPConnection -State Listen -LocalPort $Port `
+                    -ErrorAction SilentlyContinue
+            )
+            if ($listeners.Count -gt 0) {
+                if ($listeners.Count -ne 1 -or -not (
+                    Test-ProcessDescendsFrom ([int]$listeners[0].OwningProcess) $Process.Id
+                )) {
+                    throw "The selected Codex app-server port is owned by another process."
+                }
+                if ($Process.HasExited) {
+                    throw "Codex app-server exited after binding its loopback endpoint."
+                }
+                return
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        throw "Timed out waiting for the Codex app-server."
+    }
+
+    function Confirm-ManagedWatcherStarted {
+        param([Parameter(Mandatory = $true)][Diagnostics.Process]$Process)
+
+        $deadline = [DateTime]::UtcNow.AddMilliseconds(750)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            if ($Process.HasExited) {
+                $detail = Get-ManagedProcessError $Process
+                throw (
+                    "Codex mailbox watcher exited during startup." +
+                    $(if ($detail) { " $detail" } else { "" })
+                )
+            }
+            Start-Sleep -Milliseconds 50
+        }
+    }
+
+    function New-CapabilityToken {
+        $bytes = New-Object byte[] 32
+        [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+        return [Convert]::ToHexString($bytes).ToLowerInvariant()
+    }
+
+    function Get-Sha256Hex {
+        param([Parameter(Mandatory = $true)][string]$Value)
+
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            return [Convert]::ToHexString(
+                $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value))
+            ).ToLowerInvariant()
+        } finally {
+            $sha256.Dispose()
+        }
+    }
+
 function Get-DeterministicUuid {
     param(
         [Parameter(Mandatory = $true)][string]$Machine,
@@ -521,6 +828,8 @@ if ($backend -eq "copilot") {
 $mutexName = Get-MutexName $backend $mutexResource
 $mutex = $null
 $ownsMutex = $false
+[IntPtr]$codexJob = [IntPtr]::Zero
+$exitCode = 1
 try {
     try {
         $mutex = New-Object Threading.Mutex($false, $mutexName)
@@ -540,12 +849,70 @@ try {
     New-Item -ItemType Directory -Path $workspace -Force | Out-Null
     Push-Location -LiteralPath $workspace
     try {
-        & $executable @($childArguments.ToArray())
-        $exitCode = $LASTEXITCODE
+        if ($backend -eq "codex" -and $mailboxIntegration) {
+            $watcherPath = Resolve-MailboxScript $config $homePath "codex-mailbox-watcher.mjs"
+            $nodeExecutable = Resolve-AgentExecutable "node" "Node.js" "Node.js"
+            $codexJob = New-KillOnCloseJob
+            $port = Get-AvailableLoopbackPort
+            $endpoint = "ws://127.0.0.1:$port"
+            $token = New-CapabilityToken
+            $tokenHash = Get-Sha256Hex $token
+
+            $server = Start-JobProcess $codexJob $executable @(
+                "app-server",
+                "--listen", $endpoint,
+                "--ws-auth", "capability-token",
+                "--ws-token-sha256", $tokenHash
+            ) $workspace @{} -Background
+            Wait-ManagedLoopbackEndpoint $port $server
+
+            $managedEnvironment = @{
+                CODEX_APP_SERVER_ENDPOINT = $endpoint
+                CODEX_APP_SERVER_TOKEN = $token
+                CODEX_WORKSPACE = $workspace
+                CODEX_LAUNCHER_PID = [string]$PID
+            }
+            $watcher = Start-JobProcess $codexJob $nodeExecutable @(
+                $watcherPath
+            ) $workspace $managedEnvironment -Background
+            Confirm-ManagedWatcherStarted $watcher
+
+            $tuiEnvironment = @{
+                CODEX_AGENT_STACK_REMOTE_TOKEN = $token
+            }
+            $tuiArguments = New-Object System.Collections.Generic.List[string]
+            $remoteAdded = $false
+            foreach ($argument in $childArguments) {
+                if (
+                    -not $remoteAdded -and
+                    $argument -eq "--dangerously-bypass-approvals-and-sandbox"
+                ) {
+                    [void]$tuiArguments.Add("--remote")
+                    [void]$tuiArguments.Add($endpoint)
+                    [void]$tuiArguments.Add("--remote-auth-token-env")
+                    [void]$tuiArguments.Add("CODEX_AGENT_STACK_REMOTE_TOKEN")
+                    $remoteAdded = $true
+                }
+                [void]$tuiArguments.Add($argument)
+            }
+            if (-not $remoteAdded) {
+                [void]$tuiArguments.Add("--remote")
+                [void]$tuiArguments.Add($endpoint)
+                [void]$tuiArguments.Add("--remote-auth-token-env")
+                [void]$tuiArguments.Add("CODEX_AGENT_STACK_REMOTE_TOKEN")
+            }
+            $tui = Start-JobProcess $codexJob $executable (
+                $tuiArguments.ToArray()
+            ) $workspace $tuiEnvironment
+            $tui.WaitForExit()
+            $exitCode = $tui.ExitCode
+        } else {
+            & $executable @($childArguments.ToArray())
+            $exitCode = $LASTEXITCODE
+        }
     } finally {
         Pop-Location
     }
-    exit $exitCode
 } finally {
     if ($ownsMutex -and $null -ne $mutex) {
         $mutex.ReleaseMutex()
@@ -556,4 +923,10 @@ try {
     foreach ($path in $temporaryFiles) {
         Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
     }
+    if (-not (Close-JobObject $codexJob)) {
+        [Console]::Error.WriteLine(
+            "Warning: could not close the Codex process Job Object."
+        )
+    }
 }
+exit $exitCode

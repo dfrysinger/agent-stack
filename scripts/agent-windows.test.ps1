@@ -67,16 +67,31 @@ function Invoke-Launcher {
         [string]$Config = $script:configPath,
         [string]$Capture = $script:capturePath,
         [string]$Stdout = $script:stdoutPath,
-        [string]$Stderr = $script:stderrPath
+        [string]$Stderr = $script:stderrPath,
+        [int]$FakeExit = 0,
+        [int]$CodexServerExit = 0,
+        [int]$CodexWatcherExit = 0
     )
 
-    Remove-Item -LiteralPath $Capture, $Stdout, $Stderr -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (
+        $Capture,
+        $Stdout,
+        $Stderr,
+        $script:childPidsPath,
+        $script:serverCapturePath,
+        $script:watcherCapturePath
+    ) -Force -ErrorAction SilentlyContinue
     $env:AGENT_STACK_INVOCATION = $Invocation
     $env:REMOTE_AGENT_STACK_WINDOWS_CONFIG = $Config
     $env:FAKE_AGENT_CAPTURE = $Capture
-    $env:FAKE_AGENT_EXIT = "0"
+    $env:FAKE_AGENT_EXIT = [string]$FakeExit
     $env:FAKE_AGENT_READY = ""
     $env:FAKE_AGENT_RELEASE = ""
+    $env:FAKE_AGENT_CHILD_PIDS = $script:childPidsPath
+    $env:FAKE_CODEX_SERVER_CAPTURE = $script:serverCapturePath
+    $env:FAKE_CODEX_WATCHER_CAPTURE = $script:watcherCapturePath
+    $env:FAKE_CODEX_SERVER_EXIT = [string]$CodexServerExit
+    $env:FAKE_CODEX_WATCHER_EXIT = [string]$CodexWatcherExit
 
     & $script:pwsh -NoProfile -ExecutionPolicy Bypass -File $script:launcher @Arguments `
         1>$Stdout 2>$Stderr
@@ -105,6 +120,9 @@ $codexRoot = Join-Path $root "codex"
 $copilotHome = Join-Path $root "copilot-home"
 $claudeConfig = Join-Path $root "claude-config"
 $mailboxScripts = Join-Path $root "mailbox-scripts"
+$childPidsPath = Join-Path $root "child-pids.txt"
+$serverCapturePath = Join-Path $root "codex-server.json"
+$watcherCapturePath = Join-Path $root "codex-watcher.json"
 
 $savedEnvironment = @{
     AGENT_STACK_INVOCATION = $env:AGENT_STACK_INVOCATION
@@ -113,6 +131,11 @@ $savedEnvironment = @{
     FAKE_AGENT_EXIT = $env:FAKE_AGENT_EXIT
     FAKE_AGENT_READY = $env:FAKE_AGENT_READY
     FAKE_AGENT_RELEASE = $env:FAKE_AGENT_RELEASE
+    FAKE_AGENT_CHILD_PIDS = $env:FAKE_AGENT_CHILD_PIDS
+    FAKE_CODEX_SERVER_CAPTURE = $env:FAKE_CODEX_SERVER_CAPTURE
+    FAKE_CODEX_WATCHER_CAPTURE = $env:FAKE_CODEX_WATCHER_CAPTURE
+    FAKE_CODEX_SERVER_EXIT = $env:FAKE_CODEX_SERVER_EXIT
+    FAKE_CODEX_WATCHER_EXIT = $env:FAKE_CODEX_WATCHER_EXIT
     COPILOT_HOME = $env:COPILOT_HOME
     CLAUDE_CONFIG_DIR = $env:CLAUDE_CONFIG_DIR
 }
@@ -130,10 +153,45 @@ try {
     Set-Content -LiteralPath (
         Join-Path $mailboxScripts "claude-mailbox-hook.mjs"
     ) -Value "// test hook"
+    Set-Content -LiteralPath (
+        Join-Path $mailboxScripts "codex-mailbox-watcher.mjs"
+    ) -Encoding utf8 -Value @'
+import { appendFileSync, writeFileSync } from "node:fs";
+appendFileSync(process.env.FAKE_AGENT_CHILD_PIDS, `${process.pid}\n`);
+if (Number(process.env.FAKE_CODEX_WATCHER_EXIT ?? "0")) {
+  console.error("synthetic watcher startup failure");
+  process.exit(Number(process.env.FAKE_CODEX_WATCHER_EXIT));
+}
+writeFileSync(process.env.FAKE_CODEX_WATCHER_CAPTURE, JSON.stringify({
+  endpoint: process.env.CODEX_APP_SERVER_ENDPOINT ?? null,
+  tokenPresent: Boolean(process.env.CODEX_APP_SERVER_TOKEN),
+  workspace: process.env.CODEX_WORKSPACE ?? null,
+  launcherPid: process.env.CODEX_LAUNCHER_PID ?? null,
+}));
+setInterval(() => {}, 1_000);
+'@
 
     Set-Content -LiteralPath $fakeScript -Encoding utf8 -Value @'
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import net from "node:net";
 const args = process.argv.slice(2);
+if (args[0] === "app-server") {
+  appendFileSync(process.env.FAKE_AGENT_CHILD_PIDS, `${process.pid}\n`);
+  if (Number(process.env.FAKE_CODEX_SERVER_EXIT ?? "0")) {
+    console.error("synthetic app-server startup failure");
+    process.exit(Number(process.env.FAKE_CODEX_SERVER_EXIT));
+  }
+  const endpoint = new URL(args[args.indexOf("--listen") + 1]);
+  writeFileSync(process.env.FAKE_CODEX_SERVER_CAPTURE, JSON.stringify({
+    argv: args,
+    tokenPresent: Boolean(process.env.CODEX_APP_SERVER_TOKEN),
+  }));
+  net.createServer((socket) => socket.destroy()).listen(
+    Number(endpoint.port),
+    endpoint.hostname,
+  );
+  setInterval(() => {}, 1_000);
+} else {
 const settingsIndex = args.indexOf("--settings");
 const capture = {
   argv: args,
@@ -146,7 +204,11 @@ const capture = {
   claudeSettings: settingsIndex >= 0
     ? JSON.parse(readFileSync(args[settingsIndex + 1], "utf8"))
     : null,
+  codexRemoteTokenPresent: Boolean(process.env.CODEX_AGENT_STACK_REMOTE_TOKEN),
 };
+if (capture.codexRemoteTokenPresent) {
+  appendFileSync(process.env.FAKE_AGENT_CHILD_PIDS, `${process.pid}\n`);
+}
 writeFileSync(process.env.FAKE_AGENT_CAPTURE, JSON.stringify(capture));
 console.log("fake-provider-stdout");
 if (process.env.FAKE_AGENT_READY) {
@@ -156,6 +218,7 @@ while (process.env.FAKE_AGENT_RELEASE && !existsSync(process.env.FAKE_AGENT_RELE
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
 }
 process.exit(Number(process.env.FAKE_AGENT_EXIT ?? "0"));
+}
 '@
     Set-Content -LiteralPath $fakeCommand -Encoding ascii -Value @'
 @echo off
@@ -305,9 +368,117 @@ node "%~dp0fake-provider.mjs" %*
 
     $exitCode = Invoke-Launcher @("codex", "allow")
     Assert-Equal $exitCode 0 "Codex allow launch"
-    Assert-True (@((Read-Capture).argv) -contains (
+    $capture = Read-Capture
+    Assert-True (@($capture.argv) -contains (
         "--dangerously-bypass-approvals-and-sandbox"
     )) "Codex bypass missing"
+    Assert-True (@($capture.argv) -contains "--remote") (
+        "Codex remote endpoint missing"
+    )
+    Assert-True (@($capture.argv) -contains "--remote-auth-token-env") (
+        "Codex remote token environment selector missing"
+    )
+    Assert-True $capture.codexRemoteTokenPresent (
+        "Codex TUI did not receive the private token"
+    )
+    $serverCapture = Get-Content -LiteralPath $serverCapturePath -Raw |
+        ConvertFrom-Json
+    Assert-True (-not [bool]$serverCapture.tokenPresent) (
+        "Codex app-server received the raw token"
+    )
+    Assert-True (@($serverCapture.argv) -contains "--ws-token-sha256") (
+        "Codex app-server token hash missing"
+    )
+    $watcherCapture = Get-Content -LiteralPath $watcherCapturePath -Raw |
+        ConvertFrom-Json
+    Assert-True ([bool]$watcherCapture.tokenPresent) (
+        "Codex watcher did not receive the private token"
+    )
+    Assert-Equal $watcherCapture.workspace (
+        Join-Path $codexRoot "agent-allow"
+    ) (
+        "Codex watcher workspace"
+    )
+    foreach ($childPid in Get-Content -LiteralPath $childPidsPath) {
+        Assert-True ($null -eq (
+            Get-Process -Id ([int]$childPid) -ErrorAction SilentlyContinue
+        )) "Codex Job Object left child $childPid running"
+    }
+
+    $exitCode = Invoke-Launcher @("codex", "server-failure") `
+        -FakeExit 0 -CodexServerExit 9
+    Assert-Equal $exitCode 1 "Codex app-server startup failure exit"
+    Assert-True ((Get-Content $stderrPath -Raw).Contains(
+        "synthetic app-server startup failure"
+    )) "Codex app-server diagnostic missing"
+
+    $exitCode = Invoke-Launcher @("codex", "watcher-failure") `
+        -FakeExit 0 -CodexWatcherExit 9
+    Assert-Equal $exitCode 1 "Codex watcher startup failure exit"
+    Assert-True ((Get-Content $stderrPath -Raw).Contains(
+        "synthetic watcher startup failure"
+    )) "Codex watcher diagnostic missing"
+
+    $exitCode = Invoke-Launcher @("codex", "tui-failure") `
+        -FakeExit 7
+    Assert-Equal $exitCode 7 "managed Codex TUI exit propagation"
+
+    $deathReady = Join-Path $root "codex-death-ready"
+    $deathRelease = Join-Path $root "codex-death-release"
+    $deathCapture = Join-Path $root "codex-death.json"
+    Remove-Item $deathReady, $deathRelease, $deathCapture, $childPidsPath -Force `
+        -ErrorAction SilentlyContinue
+    $env:FAKE_AGENT_CAPTURE = $deathCapture
+    $env:FAKE_AGENT_READY = $deathReady
+    $env:FAKE_AGENT_RELEASE = $deathRelease
+    $env:FAKE_AGENT_CHILD_PIDS = $childPidsPath
+    $env:REMOTE_AGENT_STACK_WINDOWS_CONFIG = $configPath
+    $codexDeathLauncher = Start-Process -FilePath $pwsh -ArgumentList @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $launcher,
+        "codex", "job-death"
+    ) -WindowStyle Hidden -PassThru
+    try {
+        for ($index = 0; $index -lt 200 -and -not (Test-Path $deathReady); $index++) {
+            Start-Sleep -Milliseconds 50
+        }
+        Assert-True (Test-Path $deathReady) "Codex TUI did not start for parent-death test"
+        for ($index = 0; $index -lt 100; $index++) {
+            $deathChildren = @(
+                Get-Content -LiteralPath $childPidsPath -ErrorAction SilentlyContinue |
+                    Where-Object { $_ }
+            )
+            if ($deathChildren.Count -ge 3) { break }
+            Start-Sleep -Milliseconds 50
+        }
+        Assert-True ($deathChildren.Count -ge 3) (
+            "Codex managed children were not all observed"
+        )
+        Stop-Process -Id $codexDeathLauncher.Id -Force
+        [void]$codexDeathLauncher.WaitForExit(5000)
+        for ($index = 0; $index -lt 100; $index++) {
+            $liveChildren = @(
+                $deathChildren | Where-Object {
+                    $null -ne (Get-Process -Id ([int]$_) -ErrorAction SilentlyContinue)
+                }
+            )
+            if ($liveChildren.Count -eq 0) { break }
+            Start-Sleep -Milliseconds 50
+        }
+        Assert-Equal @($liveChildren) @() (
+            "Codex Job Object did not kill children after launcher death"
+        )
+    } finally {
+        if (-not $codexDeathLauncher.HasExited) {
+            Stop-Process -Id $codexDeathLauncher.Id -Force
+        }
+        foreach ($childPid in @($deathChildren | Where-Object { $_ })) {
+            if (Get-Process -Id ([int]$childPid) -ErrorAction SilentlyContinue) {
+                Stop-Process -Id ([int]$childPid) -Force
+            }
+        }
+    }
 
     Write-TestConfig $configPath $copilotRoot $claudeRoot $codexRoot $fakeCommand `
         -Prefix "../escape"
