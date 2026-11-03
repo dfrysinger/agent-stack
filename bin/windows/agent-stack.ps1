@@ -79,6 +79,7 @@ function Read-WindowsConfig {
         "AGENT_DIR_PREFIX",
         "ALLOW_ALL",
         "MAILBOX_INTEGRATION",
+        "MAILBOX_SCRIPTS_DIR",
         "COPILOT_AGENT_MACHINE"
     )
 
@@ -198,6 +199,40 @@ function Resolve-AgentExecutable {
         Stop-AgentStack "$Backend CLI ('$Value') not found in PATH." 1
     }
     return $command.Source
+}
+
+function Resolve-MailboxScript {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Config,
+        [Parameter(Mandatory = $true)][string]$HomePath,
+        [Parameter(Mandatory = $true)][string]$FileName
+    )
+
+    $configuredRoot = [string](Get-Setting $Config "MAILBOX_SCRIPTS_DIR" $null)
+    $roots = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($configuredRoot)) {
+        if (-not [IO.Path]::IsPathFullyQualified($configuredRoot)) {
+            Stop-AgentStack "MAILBOX_SCRIPTS_DIR must be an absolute path."
+        }
+        [void]$roots.Add([IO.Path]::GetFullPath($configuredRoot))
+    }
+    foreach ($root in @(
+        (Join-Path $HomePath ".copilot\installed-plugins\_direct\dfrysinger--skills\skills\mailbox\scripts"),
+        (Join-Path $HomePath "code\skills\skills\mailbox\scripts")
+    )) {
+        [void]$roots.Add($root)
+    }
+
+    foreach ($root in $roots) {
+        $candidate = Join-Path $root $FileName
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return [IO.Path]::GetFullPath($candidate)
+        }
+    }
+    Stop-AgentStack (
+        "Mailbox integration requires '$FileName'. Upgrade or reinstall the " +
+        "dfrysinger/skills plugin, or set MAILBOX_SCRIPTS_DIR to its scripts directory."
+    ) 1
 }
 
 function Get-DeterministicUuid {
@@ -405,6 +440,7 @@ $executable = Resolve-AgentExecutable (
 $childArguments = New-Object System.Collections.Generic.List[string]
 $mutexResource = $workspace.ToLowerInvariant()
 $env:MAILBOX_SELF_ADDRESS = "${backend}:$name"
+$temporaryFiles = New-Object System.Collections.Generic.List[string]
 
 if ($backend -eq "copilot") {
     $machine = [string](Get-Setting $config "COPILOT_AGENT_MACHINE" $null)
@@ -441,6 +477,31 @@ if ($backend -eq "copilot") {
         )
     }
 } elseif ($backend -eq "claude") {
+    if ($mailboxIntegration) {
+        $hookPath = Resolve-MailboxScript $config $homePath "claude-mailbox-hook.mjs"
+        $nodeExecutable = Resolve-AgentExecutable "node" "Node.js" "Node.js"
+        $env:CLAUDE_MAILBOX_HOOK = $hookPath
+        $settingsPath = Join-Path ([IO.Path]::GetTempPath()) (
+            "agent-stack-claude-settings-$PID-$([guid]::NewGuid().ToString('N')).json"
+        )
+        [ordered]@{
+            hooks = [ordered]@{
+                SessionStart = @(
+                    [ordered]@{
+                        hooks = @(
+                            [ordered]@{
+                                type = "command"
+                                command = '"{0}" "$CLAUDE_MAILBOX_HOOK"' -f $nodeExecutable
+                            }
+                        )
+                    }
+                )
+            }
+        } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $settingsPath -Encoding utf8
+        [void]$temporaryFiles.Add($settingsPath)
+        [void]$childArguments.Add("--settings")
+        [void]$childArguments.Add($settingsPath)
+    }
     if (Test-ClaudeHistory $workspace $homePath) {
         [void]$childArguments.Add("--continue")
     }
@@ -491,5 +552,8 @@ try {
     }
     if ($null -ne $mutex) {
         $mutex.Dispose()
+    }
+    foreach ($path in $temporaryFiles) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
     }
 }

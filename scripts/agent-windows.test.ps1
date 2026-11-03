@@ -41,7 +41,8 @@ function Write-TestConfig {
         [Parameter(Mandatory = $true)][string]$FakeCommand,
         [string]$Prefix = "agent-",
         [bool]$AllowAll = $false,
-        [bool]$MailboxIntegration = $false
+        [bool]$MailboxIntegration = $false,
+        [string]$MailboxScriptsDir = $script:mailboxScripts
     )
 
     [ordered]@{
@@ -54,6 +55,7 @@ function Write-TestConfig {
         AGENT_DIR_PREFIX = $Prefix
         ALLOW_ALL = $AllowAll
         MAILBOX_INTEGRATION = $MailboxIntegration
+        MAILBOX_SCRIPTS_DIR = $MailboxScriptsDir
         COPILOT_AGENT_MACHINE = "surface-pro"
     } | ConvertTo-Json | Set-Content -LiteralPath $Path -Encoding utf8
 }
@@ -102,6 +104,7 @@ $claudeRoot = Join-Path $root "claude"
 $codexRoot = Join-Path $root "codex"
 $copilotHome = Join-Path $root "copilot-home"
 $claudeConfig = Join-Path $root "claude-config"
+$mailboxScripts = Join-Path $root "mailbox-scripts"
 
 $savedEnvironment = @{
     AGENT_STACK_INVOCATION = $env:AGENT_STACK_INVOCATION
@@ -121,18 +124,28 @@ try {
         $claudeRoot,
         $codexRoot,
         $copilotHome,
-        $claudeConfig
+        $claudeConfig,
+        $mailboxScripts
     ) -Force | Out-Null
+    Set-Content -LiteralPath (
+        Join-Path $mailboxScripts "claude-mailbox-hook.mjs"
+    ) -Value "// test hook"
 
     Set-Content -LiteralPath $fakeScript -Encoding utf8 -Value @'
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const settingsIndex = args.indexOf("--settings");
 const capture = {
-  argv: process.argv.slice(2),
+  argv: args,
   cwd: process.cwd(),
   launcherName: process.env.COPILOT_AGENT_NAME ?? null,
   launcherSessionId: process.env.COPILOT_AGENT_SESSION_ID ?? null,
   machine: process.env.COPILOT_AGENT_MACHINE ?? null,
   mailboxSelfAddress: process.env.MAILBOX_SELF_ADDRESS ?? null,
+  claudeMailboxHook: process.env.CLAUDE_MAILBOX_HOOK ?? null,
+  claudeSettings: settingsIndex >= 0
+    ? JSON.parse(readFileSync(args[settingsIndex + 1], "utf8"))
+    : null,
 };
 writeFileSync(process.env.FAKE_AGENT_CAPTURE, JSON.stringify(capture));
 console.log("fake-provider-stdout");
@@ -272,6 +285,23 @@ node "%~dp0fake-provider.mjs" %*
         "Claude bypass missing"
     )
     Assert-Equal $capture.launcherName $null "Claude claimed mailbox identity"
+    Assert-Equal $capture.claudeMailboxHook (
+        Join-Path $mailboxScripts "claude-mailbox-hook.mjs"
+    ) "Claude mailbox hook path"
+    $settingsIndex = [array]::IndexOf(@($capture.argv), "--settings")
+    Assert-True ($settingsIndex -ge 0) "Claude mailbox settings missing"
+    $settingsPath = $capture.argv[$settingsIndex + 1]
+    Assert-Equal $capture.claudeSettings.hooks.SessionStart.Count 1 (
+        "Claude SessionStart hook count"
+    )
+    Assert-True (
+        $capture.claudeSettings.hooks.SessionStart[0].hooks[0].command.Contains(
+            '$CLAUDE_MAILBOX_HOOK'
+        )
+    ) "Claude hook command does not use the inherited path"
+    Assert-True (-not (Test-Path -LiteralPath $settingsPath)) (
+        "Claude temporary mailbox settings were not removed"
+    )
 
     $exitCode = Invoke-Launcher @("codex", "allow")
     Assert-Equal $exitCode 0 "Codex allow launch"
