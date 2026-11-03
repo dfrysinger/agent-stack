@@ -404,6 +404,7 @@ $executable = Resolve-AgentExecutable (
 
 $childArguments = New-Object System.Collections.Generic.List[string]
 $mutexResource = $workspace.ToLowerInvariant()
+$env:MAILBOX_SELF_ADDRESS = "${backend}:$name"
 
 if ($backend -eq "copilot") {
     $machine = [string](Get-Setting $config "COPILOT_AGENT_MACHINE" $null)

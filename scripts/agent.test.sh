@@ -189,9 +189,9 @@ for backend in copilot claude codex; do
   assert_contains "$LOG" "$backend"
   if [ "$backend" = "copilot" ]; then
     assert_not_contains "$LOG" "--remote"
-    assert_contains "$LOG" "env COPILOT_TASK_WAIT_TIMEOUT_SECONDS='3600' copilot"
+    assert_contains "$LOG" "env MAILBOX_SELF_ADDRESS='copilot:alpha' COPILOT_TASK_WAIT_TIMEOUT_SECONDS='3600' copilot"
   else
-    assert_contains "$LOG" "env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS $backend"
+    assert_contains "$LOG" "env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS MAILBOX_SELF_ADDRESS='$backend:alpha' $backend"
   fi
   if [ "$backend" = "codex" ]; then
     assert_not_contains "$LOG" "resume --last"
@@ -346,12 +346,12 @@ cat > "$TMP/config/remote-agent-stack/config" <<'EOF'
 COPILOT_TASK_WAIT_TIMEOUT_SECONDS="1200"
 EOF
 run_agent "$BIN_DIR/agent-stack" copilot timeout-config
-assert_contains "$LOG" "env COPILOT_TASK_WAIT_TIMEOUT_SECONDS='1200' copilot"
+assert_contains "$LOG" "env MAILBOX_SELF_ADDRESS='copilot:timeout-config' COPILOT_TASK_WAIT_TIMEOUT_SECONDS='1200' copilot"
 
 reset_tmux
 COPILOT_TASK_WAIT_TIMEOUT_SECONDS=1800 \
   run_agent "$BIN_DIR/agent-stack" copilot timeout-override
-assert_contains "$LOG" "env COPILOT_TASK_WAIT_TIMEOUT_SECONDS='1800' copilot"
+assert_contains "$LOG" "env MAILBOX_SELF_ADDRESS='copilot:timeout-override' COPILOT_TASK_WAIT_TIMEOUT_SECONDS='1800' copilot"
 
 reset_tmux
 COPILOT_TASK_WAIT_TIMEOUT_SECONDS= \

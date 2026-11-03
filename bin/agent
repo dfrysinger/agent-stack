@@ -181,6 +181,7 @@ esac
 
 DIR="$WORKSPACE_BASE/${AGENT_DIR_PREFIX}${NAME}"
 SESSION="${SESSION_PREFIX}${NAME}"
+MAILBOX_SELF_ADDRESS="$BACKEND:$NAME"
 
 # ---- preflight -------------------------------------------------------------
 
@@ -597,7 +598,7 @@ PY
     # is only a cosmetic label on the session anyway. Resume never relies on it
     # — the scan above keys on `cwd`, not `name`, precisely because Copilot's
     # auto-summarizer rewrites session names in place.
-    CMD="env COPILOT_TASK_WAIT_TIMEOUT_SECONDS='$COPILOT_TASK_WAIT_TIMEOUT_SECONDS' $AGENT_BIN --session-id='$UUID'"
+    CMD="env MAILBOX_SELF_ADDRESS='$MAILBOX_SELF_ADDRESS' COPILOT_TASK_WAIT_TIMEOUT_SECONDS='$COPILOT_TASK_WAIT_TIMEOUT_SECONDS' $AGENT_BIN --session-id='$UUID'"
     if [ "${ALLOW_ALL:-false}" = "true" ]; then
       CMD="$CMD --allow-all"
     fi
@@ -619,7 +620,7 @@ PY
       done
     fi
 
-    CMD="env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS $AGENT_BIN"
+    CMD="env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS MAILBOX_SELF_ADDRESS='$MAILBOX_SELF_ADDRESS' $AGENT_BIN"
     if [ "$HAS_SESSION" = "true" ]; then
       CMD="$CMD --continue"
     fi
@@ -660,7 +661,7 @@ PY
       HAS_SESSION=true
     fi
 
-    CMD="env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS $AGENT_BIN"
+    CMD="env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS MAILBOX_SELF_ADDRESS='$MAILBOX_SELF_ADDRESS' $AGENT_BIN"
     if [ "$HAS_SESSION" = "true" ]; then
       CMD="$CMD resume --last"
     fi

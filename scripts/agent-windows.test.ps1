@@ -132,6 +132,7 @@ const capture = {
   launcherName: process.env.COPILOT_AGENT_NAME ?? null,
   launcherSessionId: process.env.COPILOT_AGENT_SESSION_ID ?? null,
   machine: process.env.COPILOT_AGENT_MACHINE ?? null,
+  mailboxSelfAddress: process.env.MAILBOX_SELF_ADDRESS ?? null,
 };
 writeFileSync(process.env.FAKE_AGENT_CAPTURE, JSON.stringify(capture));
 console.log("fake-provider-stdout");
@@ -182,6 +183,9 @@ node "%~dp0fake-provider.mjs" %*
     Assert-Equal $capture.launcherName "hotel" "Copilot launcher name"
     Assert-Equal $capture.launcherSessionId $hotelId "Copilot session id"
     Assert-Equal $capture.machine "surface-pro" "Copilot machine"
+    Assert-Equal $capture.mailboxSelfAddress "copilot:hotel" (
+        "Copilot mailbox self address"
+    )
     Assert-True ((Get-Content $stdoutPath -Raw).Contains(
         "fake-provider-stdout"
     )) "provider stdout was captured instead of reaching the caller"
@@ -208,6 +212,9 @@ node "%~dp0fake-provider.mjs" %*
     Assert-Equal @($capture.argv) @() "Claude fresh arguments"
     $claudeWorkspace = Join-Path $claudeRoot "agent-a-hb"
     Assert-Equal $capture.cwd $claudeWorkspace "Claude encoded workspace"
+    Assert-Equal $capture.mailboxSelfAddress "claude:a-b" (
+        "Claude mailbox self address"
+    )
 
     foreach ($case in @(
         @{ Name = "a.b"; Leaf = "agent-a-db" },
@@ -241,6 +248,9 @@ node "%~dp0fake-provider.mjs" %*
         $codexWorkspace
     ) "Codex arguments"
     Assert-Equal $capture.cwd $codexWorkspace "Codex workspace"
+    Assert-Equal $capture.mailboxSelfAddress "codex:alpha" (
+        "Codex mailbox self address"
+    )
     Assert-True (-not (@($capture.argv) -contains "--all")) (
         "Codex used --all"
     )
