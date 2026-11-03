@@ -912,6 +912,13 @@ try {
     Push-Location -LiteralPath $workspace
     try {
         if ($backend -eq "codex" -and $mailboxIntegration) {
+            if ($allowAll) {
+                [Console]::Error.WriteLine(
+                    "Warning: Codex remote resume does not support permission " +
+                    "overrides; the managed session will use its existing thread " +
+                    "permissions."
+                )
+            }
             $watcherPath = Resolve-MailboxScript $config $homePath "codex-mailbox-watcher.mjs"
             $nodeExecutable = Resolve-AgentExecutable "node" "Node.js" "Node.js"
             $codexJob = New-KillOnCloseJob
@@ -954,6 +961,7 @@ try {
                     [void]$tuiArguments.Add("--remote-auth-token-env")
                     [void]$tuiArguments.Add("CODEX_AGENT_STACK_REMOTE_TOKEN")
                     $remoteAdded = $true
+                    continue
                 }
                 [void]$tuiArguments.Add($argument)
             }

@@ -369,9 +369,12 @@ node "%~dp0fake-provider.mjs" %*
     $exitCode = Invoke-Launcher @("codex", "allow")
     Assert-Equal $exitCode 0 "Codex allow launch"
     $capture = Read-Capture
-    Assert-True (@($capture.argv) -contains (
+    Assert-True (-not (@($capture.argv) -contains (
         "--dangerously-bypass-approvals-and-sandbox"
-    )) "Codex bypass missing"
+    ))) "Codex remote resume included an unsupported permission override"
+    Assert-True ((Get-Content $stderrPath -Raw).Contains(
+        "Codex remote resume does not support permission overrides"
+    )) "Codex remote permission warning missing"
     Assert-True (@($capture.argv) -contains "--remote") (
         "Codex remote endpoint missing"
     )
