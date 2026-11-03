@@ -387,17 +387,31 @@ function Resolve-MailboxScript {
             [switch]$Background
         )
 
+        $bootstrapPath = Join-Path $PSScriptRoot "job-child.ps1"
+        if (-not (Test-Path -LiteralPath $bootstrapPath -PathType Leaf)) {
+            throw "Agent Stack job bootstrap is missing: $bootstrapPath"
+        }
+        $powershellExecutable = (Get-Process -Id $PID).Path
+        $pipeName = "agent-stack-job-child-$PID-$([Guid]::NewGuid().ToString('N'))"
+        $pipe = [IO.Pipes.NamedPipeServerStream]::new(
+            $pipeName,
+            [IO.Pipes.PipeDirection]::Out,
+            1,
+            [IO.Pipes.PipeTransmissionMode]::Byte,
+            [IO.Pipes.PipeOptions]::CurrentUserOnly
+        )
         $startInfo = New-Object Diagnostics.ProcessStartInfo
         $startInfo.UseShellExecute = $false
         $startInfo.WorkingDirectory = $WorkingDirectory
         $startInfo.CreateNoWindow = [bool]$Background
-        $startInfo.FileName = $FilePath
-        foreach ($argument in $Arguments) {
-            [void]$startInfo.ArgumentList.Add($argument)
-        }
-        foreach ($entry in $Environment.GetEnumerator()) {
-            $startInfo.Environment[$entry.Key] = [string]$entry.Value
-        }
+        $startInfo.FileName = $powershellExecutable
+        [void]$startInfo.ArgumentList.Add("-NoProfile")
+        [void]$startInfo.ArgumentList.Add("-ExecutionPolicy")
+        [void]$startInfo.ArgumentList.Add("Bypass")
+        [void]$startInfo.ArgumentList.Add("-File")
+        [void]$startInfo.ArgumentList.Add($bootstrapPath)
+        [void]$startInfo.ArgumentList.Add("-PipeName")
+        [void]$startInfo.ArgumentList.Add($pipeName)
         if ($Background) {
             $startInfo.RedirectStandardOutput = $true
             $startInfo.RedirectStandardError = $true
@@ -405,22 +419,70 @@ function Resolve-MailboxScript {
 
         $process = New-Object Diagnostics.Process
         $process.StartInfo = $startInfo
-        if (-not $process.Start()) {
-            throw "Failed to start managed process: $FilePath"
-        }
-        if (-not [AgentStack.JobNativeMethods]::AssignProcessToJobObject(
-            $Job,
-            $process.Handle
-        )) {
+        try {
+            if (-not $process.Start()) {
+                throw "Failed to start managed process bootstrap."
+            }
+            if (-not [AgentStack.JobNativeMethods]::AssignProcessToJobObject(
+                $Job,
+                $process.Handle
+            )) {
+                try {
+                    $process.Kill($true)
+                } catch {}
+                throw "Cannot assign managed process bootstrap to Codex Job Object: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+            }
+            if ($Background) {
+                $collector = New-Object AgentStack.ProcessOutputCollector
+                $collector.Attach($process)
+                $process | Add-Member -NotePropertyName AgentStackOutput -NotePropertyValue $collector
+            }
+
+            $wait = $pipe.WaitForConnectionAsync()
+            $deadline = [DateTime]::UtcNow.AddSeconds(5)
+            while (-not $wait.IsCompleted -and [DateTime]::UtcNow -lt $deadline) {
+                if ($process.HasExited) {
+                    throw "Managed process bootstrap exited before accepting launch data."
+                }
+                Start-Sleep -Milliseconds 25
+            }
+            if (-not $wait.IsCompleted) {
+                throw "Timed out waiting for the managed process bootstrap."
+            }
+            $wait.GetAwaiter().GetResult()
+
+            $launchEnvironment = @{}
+            foreach ($entry in $Environment.GetEnumerator()) {
+                $launchEnvironment[$entry.Key] = [string]$entry.Value
+            }
+            $request = @{
+                filePath = $FilePath
+                arguments = @($Arguments)
+                workingDirectory = $WorkingDirectory
+                environment = $launchEnvironment
+                background = [bool]$Background
+            } | ConvertTo-Json -Compress -Depth 4
+            $writer = [IO.StreamWriter]::new(
+                $pipe,
+                [Text.UTF8Encoding]::new($false),
+                1024,
+                $true
+            )
             try {
-                $process.Kill($true)
-            } catch {}
-            throw "Cannot assign managed process to Codex Job Object: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
-        }
-        if ($Background) {
-            $collector = New-Object AgentStack.ProcessOutputCollector
-            $collector.Attach($process)
-            $process | Add-Member -NotePropertyName AgentStackOutput -NotePropertyValue $collector
+                $writer.WriteLine($request)
+                $writer.Flush()
+            } finally {
+                $writer.Dispose()
+            }
+        } catch {
+            if (-not $process.HasExited) {
+                try {
+                    $process.Kill($true)
+                } catch {}
+            }
+            throw
+        } finally {
+            $pipe.Dispose()
         }
         return $process
     }
