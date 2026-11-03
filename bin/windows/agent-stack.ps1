@@ -914,9 +914,9 @@ try {
         if ($backend -eq "codex" -and $mailboxIntegration) {
             if ($allowAll) {
                 [Console]::Error.WriteLine(
-                    "Warning: Codex remote resume does not support permission " +
-                    "overrides; the managed session will use its existing thread " +
-                    "permissions."
+                    "Warning: managed Codex applies ALLOW_ALL when the mailbox " +
+                    "starts an idle turn; interactive remote turns use Codex's " +
+                    "configured permissions until that thread policy is established."
                 )
             }
             $watcherPath = Resolve-MailboxScript $config $homePath "codex-mailbox-watcher.mjs"
@@ -940,6 +940,7 @@ try {
                 CODEX_APP_SERVER_TOKEN = $token
                 CODEX_WORKSPACE = $workspace
                 CODEX_LAUNCHER_PID = [string]$PID
+                CODEX_ALLOW_ALL = $allowAll.ToString().ToLowerInvariant()
             }
             $watcher = Start-JobProcess $codexJob $nodeExecutable @(
                 $watcherPath

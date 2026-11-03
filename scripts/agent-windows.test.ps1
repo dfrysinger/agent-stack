@@ -167,6 +167,7 @@ writeFileSync(process.env.FAKE_CODEX_WATCHER_CAPTURE, JSON.stringify({
   tokenPresent: Boolean(process.env.CODEX_APP_SERVER_TOKEN),
   workspace: process.env.CODEX_WORKSPACE ?? null,
   launcherPid: process.env.CODEX_LAUNCHER_PID ?? null,
+  allowAll: process.env.CODEX_ALLOW_ALL ?? null,
 }));
 setInterval(() => {}, 1_000);
 '@
@@ -373,8 +374,8 @@ node "%~dp0fake-provider.mjs" %*
         "--dangerously-bypass-approvals-and-sandbox"
     ))) "Codex remote resume included an unsupported permission override"
     Assert-True ((Get-Content $stderrPath -Raw).Contains(
-        "Codex remote resume does not support permission overrides"
-    )) "Codex remote permission warning missing"
+        "managed Codex applies ALLOW_ALL when the mailbox starts an idle turn"
+    )) "Codex remote permission boundary warning missing"
     Assert-True (@($capture.argv) -contains "--remote") (
         "Codex remote endpoint missing"
     )
@@ -402,6 +403,7 @@ node "%~dp0fake-provider.mjs" %*
     ) (
         "Codex watcher workspace"
     )
+    Assert-Equal $watcherCapture.allowAll "true" "Codex watcher allow-all policy"
     foreach ($childPid in Get-Content -LiteralPath $childPidsPath) {
         Assert-True ($null -eq (
             Get-Process -Id ([int]$childPid) -ErrorAction SilentlyContinue
