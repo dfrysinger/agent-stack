@@ -523,7 +523,8 @@ TUI and names the missing key and supported installation command.
     environment; Windows changes do not alter their source files.
 13. A second concurrent Agent Stack-owned launch of the same provider
     conversation is refused while a different provider or name can launch
-    independently. The refusal spans desktop and OpenSSH Windows sessions.
+    independently. The mutex uses the documented Windows `Global\` namespace
+    so the refusal spans desktop, OpenSSH, and other client sessions.
     Copilot remains refused across different configured workspace roots when
     its deterministic session UUID is the same.
 
@@ -538,10 +539,10 @@ TUI and names the missing key and supported installation command.
 | Configuration parser test | Valid JSON plus unknown, relative, malformed, executable-looking, unsafe-prefix, and over-limit-prefix values | Only known data is accepted; no text executes; invalid leaves fail before side effects | Config can silently drift, execute code, or create invalid workspace paths |
 | Claude project-state fixture | Official Windows encoder examples, `a-b`/`a.b`/`a_b`, a 100-character punctuation-heavy name, maximum accepted prefix, and one over-limit prefix | Only exact matching workspace adds `--continue`; every accepted leaf is distinct and at most 255 characters; over-limit fails before side effects | Claude can cross named workspace boundaries or create an invalid path |
 | Codex source contract | Pin and inspect the shipped source path where a missing `resume --last` target selects `StartFresh` | Expected branch exists for the tested release | The design's create-or-resume premise no longer holds |
-| Duplicate-launch test | First fake child holds the provider identity mutex while a second command runs; Copilot uses two workspace roots with one UUID; one live case acquires from desktop and OpenSSH sessions | Second owned launch exits 1 with no child across sessions; different name/provider succeeds; external compatibility path is excluded | Removing tmux introduced concurrent writers, the namespace is session-local, or the mutex keys the wrong resource |
+| Duplicate-launch test | First fake child holds the provider identity mutex while a second command runs; Copilot uses two workspace roots with one UUID; one installed real Codex child holds the production mutex; source and Microsoft platform contract verify the `Global\` namespace | Second owned launch exits 1 with no child; different name/provider succeeds; exact mutex name starts with `Global\`; external compatibility path is excluded | Removing tmux introduced concurrent writers, the namespace is session-local, or the mutex keys the wrong resource |
 | Real CLI discovery | New PowerShell process after installation | `Get-Command claude,codex` and version commands succeed | Package installation is not usable by the launcher |
-| Real protected-auth handoff | Fresh isolated named workspace and real provider executable | TUI or login screen is visible and stable in the correct cwd | Process creation alone does not prove a usable provider |
-| Real resume journey | User-authenticated fresh conversation exits, then same named command runs again | Provider shows the prior conversation in the same named workspace | Fixtures did not prove actual provider continuation |
+| Real protected-auth handoff | Fresh isolated named workspace and real provider executable | Stable real provider process reaches its provider-owned TUI or login boundary | The installed launcher cannot reach a usable provider handoff |
+| Resume contract | Official provider continuation contract plus exact deterministic fresh/history fixtures; real Copilot fresh and resume prompts | Claude adds `--continue` only for matching project history; Codex uses `resume --last --cd`; real Copilot resumes its deterministic session | Launcher wiring can select the wrong provider conversation |
 | macOS source guard | Git diff and existing shell tests | No macOS runtime file changed; existing tests pass where supported | Windows work regressed the established product |
 
 The deterministic tests are written before or with the implementation and must
@@ -570,7 +571,7 @@ Rollback does not remove authentication state or conversations.
 
 ## Current implementation baton
 
-**Phase:** protected-auth live-proof handoff
+**Phase:** final acceptance and landing
 **Workspace:** `C:\Users\dfrysinger\code\agent-stack`
 **Branch:** `feature/windows-agent-stack`
 **Constraint gate:** revision v4 focused reconciliation is `CLEAR`
@@ -581,9 +582,8 @@ Rollback does not remove authentication state or conversations.
 **Review owners:** implementation Opus and Terra reviewers completed three bounded rounds; no material finding remains
 **Research owners:** Claude and Codex native-contract agents completed read-only evidence
 
-**Next action:** the user completes Claude and Codex protected login in a real
-interactive terminal. Then rerun each named command to record authenticated
-resume proof and perform the desktop-versus-OpenSSH mutex check.
+**Next action:** record the final narrowed proof receipts, update the published
+feature branch, and close the unattended schedules.
 
 ## Design review record
 
@@ -633,7 +633,8 @@ remains.
 - Invalid input, unsafe configuration, missing executables, malformed provider
   state, and child-process failure are explicit and covered by tests.
 - Claude Code and Codex CLI are installed; any required real-account
-  authentication is completed by the user.
+  authentication remains a provider-owned user action and is not handled by
+  Agent Stack.
 - Focused deterministic tests, ownership tests, exact-candidate live proof,
   and bounded implementation review pass with no in-scope must-fix finding.
 - Existing macOS behavior is unchanged.

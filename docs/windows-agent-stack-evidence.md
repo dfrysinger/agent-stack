@@ -192,6 +192,23 @@ Sources:
 - <https://github.com/microsoft/winget-pkgs/blob/master/manifests/o/OpenAI/Codex/0.166.0/OpenAI.Codex.installer.yaml>
 - <https://github.com/openai/codex/blob/fbf5f0d3a716d08c254d3e4941d5b12eaff5afe7/codex-rs/tui/src/lib.rs>
 
+## Windows cross-session mutex contract
+
+Microsoft documents that Windows has one named-kernel-object namespace per
+client session plus a global namespace. A client process opts into the global
+namespace by prepending the case-sensitive `Global\` prefix. Microsoft
+explicitly identifies a mutex used to detect one application instance across
+all sessions as a use case for this namespace.
+
+The reviewed launcher creates `Global\dfrysinger-agent-stack-v1-<hash>`.
+Deterministic tests cover exact conflicting-resource keys, and a real installed
+Codex launch held that production mutex while a second installed launch was
+refused without starting another child.
+
+Source:
+
+- <https://learn.microsoft.com/en-us/windows/win32/termserv/kernel-object-namespaces>
+
 ## Closed evidence questions
 
 Both missing providers have native Windows executables and working-directory

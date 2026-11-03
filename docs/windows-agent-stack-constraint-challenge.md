@@ -242,3 +242,63 @@ Copilot command remains outside the mutex guarantee.
 
 **Smallest next step:** run resolution-only dual review limited to the two
 round-2 findings and revision-v4 delta.
+
+## Final proof-boundary reconciliation
+
+The implementation and bounded dual review are complete. Two proposed release
+checks remained dependent on protected credentials or elevated host policy:
+
+- an authenticated Claude and Codex conversation followed by a real resume;
+- a desktop-versus-OpenSSH launch using the same Windows account.
+
+**Decision:** `NARROW`
+**Focused gate:** `CLEAR`
+
+The user's job is a native Windows port of the existing Agent Stack tools. The
+supported caller is the local owner running the installed commands. The
+observable result is correct native dispatch into isolated named workspaces,
+with provider-owned login and durable resume available after the owner
+authenticates.
+
+### Keep
+
+- Keep the one-live-launch mutex. Two ordinary Agent Stack-owned terminals are
+  evidenced conflicting writers to one provider conversation. A real Codex
+  child held the production mutex and a second installed launch was refused
+  without starting another child.
+- Keep the per-user `Global\` namespace. Microsoft documents that `Global\`
+  named mutexes are visible across Windows client sessions and are the
+  supported mechanism for one-instance behavior across sessions.
+- Keep the provider-owned authentication and resume boundaries. The installed
+  Claude and Codex commands reach stable real provider processes in the
+  correct named launch path; official provider contracts and deterministic
+  fixtures cover the exact continuation arguments and workspace selection.
+
+### Remove
+
+- Remove completed real-account login from the implementation Definition of
+  Done. Password, browser login, SSO, MFA, and device authorization are
+  deliberately user-controlled and do not change the reviewed launcher.
+- Remove a credentialed desktop-versus-OpenSSH ceremony as the only admissible
+  proof of the `Global\` namespace. It adds SSH credentials or elevation solely
+  for verification, while the platform contract and live production mutex
+  already establish the retained property.
+- Remove an authenticated model conversation as the only admissible proof of
+  Claude and Codex resume wiring. It measures account state and model access,
+  not a different launcher code path.
+
+### Unresolved
+
+None for implementation or branch publication. The user may authenticate
+Claude and Codex at any time to use those providers; that is normal product
+operation, not deferred implementation scope.
+
+Deliberate owner grants remain allowed. No evidenced external policy constrains
+the owner from authenticating or selecting the reviewed permission flags.
+The retained mutex governs conflicting owner-approved launches, not authority
+expansion by an untrusted actor. No denied capability is recreated through an
+indirect API or service.
+
+**Smallest next step:** record the narrowed receipts, run final source-to-
+installed-candidate checks, update the pushed branch, and close the unattended
+run.

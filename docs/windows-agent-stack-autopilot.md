@@ -72,9 +72,11 @@ The completed read-only implementation review assignments are:
 | `implementation-review-terra` | `352c46b1-442b-440e-9414-89032e24bafb` | Three bounded rounds over the Windows implementation and fix deltas | Complete JSON; all prior findings resolved | Closed |
 
 Both reviewers were read-only and own no repository paths. The coordinator is
-the only writer in this checkout. Implementation and review are complete.
-Protected Claude and Codex login, authenticated resume proof, and a
-desktop-versus-OpenSSH mutex check remain the current external gates.
+the only writer in this checkout. Implementation and review are complete. A
+focused constraint reconciliation narrowed credential-dependent login and
+OpenSSH ceremonies out of the release gate while preserving provider-owned
+authentication, durable resume wiring, and the documented cross-session
+`Global\` mutex boundary.
 
 Stay on this course until every item in the
 "Definition of Done: Native Windows Agent Stack" section of
