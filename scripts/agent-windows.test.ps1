@@ -138,7 +138,9 @@ $savedEnvironment = @{
     FAKE_CODEX_WATCHER_EXIT = $env:FAKE_CODEX_WATCHER_EXIT
     COPILOT_HOME = $env:COPILOT_HOME
     CLAUDE_CONFIG_DIR = $env:CLAUDE_CONFIG_DIR
+    MAILBOX_SCRIPTS_DIR = $env:MAILBOX_SCRIPTS_DIR
 }
+$env:MAILBOX_SCRIPTS_DIR = $null
 
 try {
     New-Item -ItemType Directory -Path (
@@ -153,6 +155,9 @@ try {
     Set-Content -LiteralPath (
         Join-Path $mailboxScripts "claude-mailbox-hook.mjs"
     ) -Value "// test hook"
+    Set-Content -LiteralPath (
+        Join-Path $mailboxScripts "mailbox.mjs"
+    ) -Value "// test mailbox CLI"
     Set-Content -LiteralPath (
         Join-Path $mailboxScripts "codex-mailbox-watcher.mjs"
     ) -Encoding utf8 -Value @'
@@ -201,6 +206,7 @@ const capture = {
   launcherSessionId: process.env.COPILOT_AGENT_SESSION_ID ?? null,
   machine: process.env.COPILOT_AGENT_MACHINE ?? null,
   mailboxSelfAddress: process.env.MAILBOX_SELF_ADDRESS ?? null,
+  mailboxScriptsDir: process.env.MAILBOX_SCRIPTS_DIR ?? null,
   claudeMailboxHook: process.env.CLAUDE_MAILBOX_HOOK ?? null,
   claudeSettings: settingsIndex >= 0
     ? JSON.parse(readFileSync(args[settingsIndex + 1], "utf8"))
@@ -341,6 +347,9 @@ node "%~dp0fake-provider.mjs" %*
         "Copilot allow-all missing"
     )
     Assert-True (@($capture.argv) -contains "-i") "Copilot mailbox prompt missing"
+    Assert-Equal $capture.mailboxScriptsDir $mailboxScripts (
+        "Copilot mailbox scripts directory"
+    )
 
     $exitCode = Invoke-Launcher @("claude", "allow")
     Assert-Equal $exitCode 0 "Claude allow launch"
@@ -352,6 +361,9 @@ node "%~dp0fake-provider.mjs" %*
     Assert-Equal $capture.claudeMailboxHook (
         Join-Path $mailboxScripts "claude-mailbox-hook.mjs"
     ) "Claude mailbox hook path"
+    Assert-Equal $capture.mailboxScriptsDir $mailboxScripts (
+        "Claude mailbox scripts directory"
+    )
     $settingsIndex = [array]::IndexOf(@($capture.argv), "--settings")
     Assert-True ($settingsIndex -ge 0) "Claude mailbox settings missing"
     $settingsPath = $capture.argv[$settingsIndex + 1]
@@ -384,6 +396,9 @@ node "%~dp0fake-provider.mjs" %*
     )
     Assert-True $capture.codexRemoteTokenPresent (
         "Codex TUI did not receive the private token"
+    )
+    Assert-Equal $capture.mailboxScriptsDir $mailboxScripts (
+        "Codex mailbox scripts directory"
     )
     $serverCapture = Get-Content -LiteralPath $serverCapturePath -Raw |
         ConvertFrom-Json

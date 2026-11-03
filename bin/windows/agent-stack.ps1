@@ -810,6 +810,10 @@ $childArguments = New-Object System.Collections.Generic.List[string]
 $mutexResource = $workspace.ToLowerInvariant()
 $env:MAILBOX_SELF_ADDRESS = "${backend}:$name"
 $temporaryFiles = New-Object System.Collections.Generic.List[string]
+if ($mailboxIntegration) {
+    $mailboxCliPath = Resolve-MailboxScript $config $homePath "mailbox.mjs"
+    $env:MAILBOX_SCRIPTS_DIR = Split-Path -Parent $mailboxCliPath
+}
 
 if ($backend -eq "copilot") {
     $machine = [string](Get-Setting $config "COPILOT_AGENT_MACHINE" $null)
