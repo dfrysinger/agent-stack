@@ -84,6 +84,19 @@ class SessionCacheTests(unittest.TestCase):
         os.replace(replacement, path)
         self.run_selector(A)
 
+    def test_native_retirement_overrides_warm_cache_and_directory_alias(self):
+        self.write("old", A, "2026-09-01")
+        self.write("current", B, "2026-08-01")
+        self.run_selector(A)
+        barrier = self.root / "old/rotation.barrier"
+        barrier.write_text("historically retired\n")
+        self.assertIn("2 reused, 0 read", self.run_selector(B).stderr)
+        self.assertEqual(barrier.read_text(), "historically retired\n")
+        barrier.unlink()
+        (self.root / A).mkdir()
+        (self.root / A / "rotation.barrier").touch()
+        self.run_selector(B)
+
     def test_corrupt_incompatible_and_unwritable_cache(self):
         self.write("a")
         self.run_selector()

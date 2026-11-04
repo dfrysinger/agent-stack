@@ -306,6 +306,28 @@ run_agent "$BIN_DIR/agent-stack" copilot selected
 assert_contains "$LOG" "--session-id='66666666-6666-6666-6666-666666666666'"
 
 reset_tmux
+touch "$HOME_DIR/.copilot/session-state/tie-a/rotation.barrier"
+run_agent "$BIN_DIR/agent-stack" copilot selected
+assert_contains "$LOG" "--session-id='77777777-7777-7777-7777-777777777777'"
+[ -f "$HOME_DIR/.copilot/session-state/tie-a/rotation.barrier" ]
+
+reset_tmux
+fallback="$(python3 -c "import uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, 'remote-agent-stack/native-retired-fallback'))")"
+mkdir -p "$HOME_DIR/.copilot/session-state/$fallback"
+touch "$HOME_DIR/.copilot/session-state/$fallback/rotation.barrier"
+run_agent "$BIN_DIR/agent-stack" copilot native-retired-fallback
+assert_not_contains "$LOG" "--session-id='$fallback'"
+assert_contains "$LOG" "--session-id='"
+[ -f "$HOME_DIR/.copilot/session-state/$fallback/rotation.barrier" ]
+
+reset_tmux
+fallback="$(python3 -c "import uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, 'remote-agent-stack/wrapper-retired-fallback'))")"
+mkdir -p "$COPILOT_BASE/agent-wrapper-retired-fallback"
+printf '%s\n' "$fallback" > "$COPILOT_BASE/agent-wrapper-retired-fallback/.ca-retired-sessions"
+run_agent "$BIN_DIR/agent-stack" copilot wrapper-retired-fallback
+assert_not_contains "$LOG" "--session-id='$fallback'"
+
+reset_tmux
 mkdir -p "$HOME_DIR/Library/Keychains"
 touch "$HOME_DIR/Library/Keychains/login.keychain-db"
 run_agent "$BIN_DIR/agent-stack" copilot keychain >"$TMP/stdout" 2>"$TMP/stderr"
