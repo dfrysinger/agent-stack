@@ -22,6 +22,8 @@ for name in copilot claude codex; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN_DIR/$name"
   chmod +x "$BIN_DIR/$name"
 done
+printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN_DIR/node"
+chmod +x "$BIN_DIR/node"
 
 cat > "$BIN_DIR/security" <<'FAKE_SECURITY'
 #!/usr/bin/env bash
@@ -313,19 +315,106 @@ assert_contains "$AUX_LOG" "security|unlock-keychain"
 assert_contains "$TMP/stderr" "Unlocking the login keychain"
 
 reset_tmux
-MAILBOX_DIR="$HOME_DIR/.copilot/installed-plugins/_direct/dfrysinger--skills/skills/mailbox/scripts"
-mkdir -p "$MAILBOX_DIR"
+MAILBOX_REPO_ROOT="$HOME_DIR/.copilot/installed-plugins/_direct/dfrysinger--skills"
+MAILBOX_DIR="$MAILBOX_REPO_ROOT/skills/mailbox/scripts"
+mkdir -p "$MAILBOX_DIR" "$MAILBOX_REPO_ROOT/extensions/session-control"
+printf '// Test fixture.\n' >"$MAILBOX_REPO_ROOT/extensions/session-control/diagnostics.mjs"
 cat > "$MAILBOX_DIR/mailbox-poke.sh" <<'MAILBOX'
 #!/usr/bin/env bash
+# supports --tmux-session
 printf 'mailbox|%s\n' "$*" >> "$FAKE_AUX_LOG"
 MAILBOX
 chmod +x "$MAILBOX_DIR/mailbox-poke.sh"
 MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" copilot mailbox
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  grep -Fq "mailbox|mailbox --wait" "$AUX_LOG" 2>/dev/null && break
+  grep -Fq "mailbox|copilot:mailbox --tmux-session mailbox --wait" "$AUX_LOG" 2>/dev/null && break
   sleep 0.1
 done
-assert_contains "$AUX_LOG" "mailbox|mailbox --wait"
+assert_contains "$AUX_LOG" "mailbox|copilot:mailbox --tmux-session mailbox --wait"
+
+reset_tmux
+for file in claude-mailbox-hook.mjs claude-mailbox-adapter.mjs \
+  claude-mailbox-watcher.mjs mailbox-core.mjs; do
+  printf '// Test fixture.\n' >"$MAILBOX_DIR/$file"
+done
+MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" claude mailbox
+assert_contains "$LOG" "MAILBOX_SELF_ADDRESS='claude:mailbox' claude --settings"
+assert_contains "$LOG" "claude-mailbox-hook.mjs"
+assert_not_contains "$LOG" "CLAUDE_CODE_MESSAGING_TOKEN"
+
+reset_tmux
+rm "$MAILBOX_DIR/claude-mailbox-watcher.mjs"
+MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" claude fallback \
+  >"$TMP/stdout" 2>"$TMP/stderr"
+assert_not_contains "$LOG" "--settings"
+assert_contains "$TMP/stderr" "using the guarded tmux fallback"
+printf '// Test fixture.\n' >"$MAILBOX_DIR/claude-mailbox-watcher.mjs"
+
+reset_tmux
+CUSTOM_SKILLS_ROOT="$TMP/custom-skills"
+CUSTOM_MAILBOX_DIR="$CUSTOM_SKILLS_ROOT/skills/mailbox/scripts"
+mkdir -p "$CUSTOM_MAILBOX_DIR" "$CUSTOM_SKILLS_ROOT/extensions/session-control"
+printf '// Test fixture.\n' >"$CUSTOM_SKILLS_ROOT/extensions/session-control/diagnostics.mjs"
+cp "$MAILBOX_DIR/mailbox-poke.sh" "$CUSTOM_MAILBOX_DIR/mailbox-poke.sh"
+MAILBOX_INTEGRATION=true MAILBOX_SCRIPTS_DIR="$CUSTOM_MAILBOX_DIR" \
+  run_agent "$BIN_DIR/agent-stack" claude incomplete-candidate \
+  >"$TMP/stdout" 2>"$TMP/stderr"
+assert_not_contains "$LOG" "--settings"
+assert_contains "$TMP/stderr" "using the guarded tmux fallback"
+
+reset_tmux
+EMPTY_MAILBOX_DIR="$TMP/empty-mailbox"
+mkdir -p "$EMPTY_MAILBOX_DIR"
+MAILBOX_INTEGRATION=true MAILBOX_SCRIPTS_DIR="$EMPTY_MAILBOX_DIR" \
+  run_agent "$BIN_DIR/agent-stack" claude pending-only \
+  >"$TMP/stdout" 2>"$TMP/stderr"
+assert_not_contains "$LOG" "--settings"
+assert_contains "$TMP/stderr" "mailbox envelopes will remain pending"
+
+reset_tmux
+for file in claude-mailbox-hook.mjs claude-mailbox-adapter.mjs \
+  claude-mailbox-watcher.mjs mailbox-core.mjs; do
+  cp "$MAILBOX_DIR/$file" "$CUSTOM_MAILBOX_DIR/$file"
+done
+MAILBOX_INTEGRATION=true MAILBOX_SCRIPTS_DIR="$CUSTOM_MAILBOX_DIR" \
+  run_agent "$BIN_DIR/agent-stack" claude custom-mailbox
+assert_contains "$LOG" "$CUSTOM_MAILBOX_DIR/claude-mailbox-hook.mjs"
+
+reset_tmux
+LEGACY_MAILBOX_DIR="$TMP/legacy-mailbox"
+mkdir -p "$LEGACY_MAILBOX_DIR"
+cat >"$LEGACY_MAILBOX_DIR/mailbox-poke.sh" <<'MAILBOX'
+#!/usr/bin/env bash
+printf 'legacy-mailbox|%s\n' "$*" >> "$FAKE_AUX_LOG"
+MAILBOX
+chmod +x "$LEGACY_MAILBOX_DIR/mailbox-poke.sh"
+MAILBOX_INTEGRATION=true MAILBOX_SCRIPTS_DIR="$LEGACY_MAILBOX_DIR" \
+  run_agent "$BIN_DIR/agent-stack" copilot legacy
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  grep -Fq "legacy-mailbox|legacy --wait" "$AUX_LOG" 2>/dev/null && break
+  sleep 0.1
+done
+assert_contains "$AUX_LOG" "legacy-mailbox|legacy --wait"
+
+reset_tmux
+MAILBOX_INTEGRATION=true MAILBOX_SCRIPTS_DIR="$LEGACY_MAILBOX_DIR" \
+  run_agent "$BIN_DIR/agent-stack" claude legacy-claude \
+  >"$TMP/stdout" 2>"$TMP/stderr"
+assert_not_contains "$TMP/stderr" "guarded tmux fallback"
+assert_contains "$TMP/stderr" "mailbox envelopes will remain pending"
+
+reset_tmux
+cat >"$BIN_DIR/python3" <<'PYTHON'
+#!/usr/bin/env bash
+exit 9
+PYTHON
+chmod +x "$BIN_DIR/python3"
+MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" claude python-fallback \
+  >"$TMP/stdout" 2>"$TMP/stderr"
+assert_not_contains "$LOG" "--settings"
+assert_contains "$TMP/stderr" "settings could not be generated"
+assert_contains "$TMP/stderr" "Using the guarded tmux fallback"
+rm "$BIN_DIR/python3"
 
 reset_tmux
 mkdir -p "$HOME_DIR/.claude/projects/$(printf '%s' "$CLAUDE_BASE/agent-alpha" | sed 's|/|-|g')"

@@ -25,6 +25,7 @@
 #     claude : --dangerously-skip-permissions
 #     codex  : --dangerously-bypass-approvals-and-sandbox
 #   MAILBOX_INTEGRATION      default: false
+#   MAILBOX_SCRIPTS_DIR      optional absolute mailbox scripts directory
 #   SESSION_WARN_MB          default: 300  (copilot only; 0 disables)
 #     Offer to retire a session whose event log has grown past this size.
 
@@ -69,7 +70,8 @@ Config:
   ~/.config/remote-agent-stack/config
   Env: COPILOT_WORKSPACE_BASE, CLAUDE_WORKSPACE_BASE, CODEX_WORKSPACE_BASE,
        COPILOT_BIN, CLAUDE_BIN, CODEX_BIN, AGENT_DIR_PREFIX, ALLOW_ALL,
-       MAILBOX_INTEGRATION, COPILOT_TASK_WAIT_TIMEOUT_SECONDS
+       MAILBOX_INTEGRATION, MAILBOX_SCRIPTS_DIR,
+       COPILOT_TASK_WAIT_TIMEOUT_SECONDS
 USAGE
 }
 
@@ -210,15 +212,99 @@ fi
 # MAILBOX_INTEGRATION is not set to "true" in config.
 
 MAILBOX_POKE=""
+MAILBOX_POKE_PROVIDER_AWARE=false
+CLAUDE_MAILBOX_SETTINGS_ARG=""
 if [ "${MAILBOX_INTEGRATION:-false}" = "true" ]; then
-  for _p in \
-    "$HOME/.copilot/installed-plugins/_direct/dfrysinger--skills/skills/mailbox/scripts/mailbox-poke.sh" \
-    "$HOME/.claude/plugins/repos/dfrysinger/skills/skills/mailbox/scripts/mailbox-poke.sh" \
-    "$HOME/code/skills/skills/mailbox/scripts/mailbox-poke.sh" \
-    "$HOME/.copilot/skills/mailbox/scripts/mailbox-poke.sh"; do
-    [ -x "$_p" ] && { MAILBOX_POKE="$_p"; break; }
-  done
+  if [ -n "${MAILBOX_SCRIPTS_DIR:-}" ]; then
+    [ -x "$MAILBOX_SCRIPTS_DIR/mailbox-poke.sh" ] &&
+      MAILBOX_POKE="$MAILBOX_SCRIPTS_DIR/mailbox-poke.sh"
+  else
+    for _p in \
+      "$HOME/.copilot/installed-plugins/_direct/dfrysinger--skills/skills/mailbox/scripts/mailbox-poke.sh" \
+      "$HOME/.claude/plugins/repos/dfrysinger/skills/skills/mailbox/scripts/mailbox-poke.sh" \
+      "$HOME/code/skills/skills/mailbox/scripts/mailbox-poke.sh" \
+      "$HOME/.copilot/skills/mailbox/scripts/mailbox-poke.sh"; do
+      [ -x "$_p" ] && { MAILBOX_POKE="$_p"; break; }
+    done
+  fi
+  if [ -n "$MAILBOX_POKE" ] && grep -Fq -- "--tmux-session" "$MAILBOX_POKE"; then
+    MAILBOX_POKE_PROVIDER_AWARE=true
+  fi
+  NODE_BIN="$(command -v node 2>/dev/null || true)"
+
+  if [ "$BACKEND" = "claude" ]; then
+    CLAUDE_MAILBOX_HOOK=""
+    if [ -n "${MAILBOX_SCRIPTS_DIR:-}" ]; then
+      CLAUDE_MAILBOX_ROOT="$MAILBOX_SCRIPTS_DIR"
+    else
+      for _p in \
+        "$HOME/.copilot/installed-plugins/_direct/dfrysinger--skills/skills/mailbox/scripts/claude-mailbox-hook.mjs" \
+        "$HOME/.claude/plugins/marketplaces/dfrysinger-skills/skills/mailbox/scripts/claude-mailbox-hook.mjs" \
+        "$HOME/code/skills/skills/mailbox/scripts/claude-mailbox-hook.mjs" \
+        "$HOME/.copilot/skills/mailbox/scripts/claude-mailbox-hook.mjs"; do
+        [ -f "$_p" ] && { CLAUDE_MAILBOX_ROOT="$(dirname "$_p")"; break; }
+      done
+    fi
+    if [ -n "${CLAUDE_MAILBOX_ROOT:-}" ] &&
+       [ -f "$CLAUDE_MAILBOX_ROOT/claude-mailbox-hook.mjs" ] &&
+       [ -f "$CLAUDE_MAILBOX_ROOT/claude-mailbox-adapter.mjs" ] &&
+       [ -f "$CLAUDE_MAILBOX_ROOT/claude-mailbox-watcher.mjs" ] &&
+       [ -f "$CLAUDE_MAILBOX_ROOT/mailbox-core.mjs" ] &&
+       [ -f "$CLAUDE_MAILBOX_ROOT/../../../extensions/session-control/diagnostics.mjs" ]; then
+      CLAUDE_MAILBOX_HOOK="$CLAUDE_MAILBOX_ROOT/claude-mailbox-hook.mjs"
+    fi
+    if [ -z "$CLAUDE_MAILBOX_HOOK" ]; then
+      echo "Warning: native Claude mailbox delivery is unavailable." >&2
+      if [ "$MAILBOX_POKE_PROVIDER_AWARE" = "true" ] && [ -n "$NODE_BIN" ]; then
+        echo "Upgrade or reinstall the dfrysinger/skills plugin; using the guarded tmux fallback." >&2
+      else
+        echo "Upgrade or reinstall the dfrysinger/skills plugin; mailbox envelopes will remain pending." >&2
+      fi
+    else
+      if [ -z "$NODE_BIN" ]; then
+        echo "Warning: native Claude mailbox delivery requires Node.js in PATH." >&2
+        echo "Mailbox envelopes will remain pending until Node.js is available." >&2
+      else
+        if CLAUDE_MAILBOX_SETTINGS="$(
+          python3 - "$NODE_BIN" "$CLAUDE_MAILBOX_HOOK" <<'PY'
+import json
+import shlex
+import sys
+
+node, hook = sys.argv[1:]
+print(json.dumps({
+    "hooks": {
+        "SessionStart": [{
+            "hooks": [{
+                "type": "command",
+                "command": shlex.join([node, hook]),
+            }],
+        }],
+    },
+}, separators=(",", ":")))
+PY
+        )"; then
+          printf -v CLAUDE_MAILBOX_SETTINGS_ARG '%q' "$CLAUDE_MAILBOX_SETTINGS"
+        else
+          echo "Warning: native Claude mailbox settings could not be generated." >&2
+          if [ "$MAILBOX_POKE_PROVIDER_AWARE" = "true" ] && [ -n "$NODE_BIN" ]; then
+            echo "Using the guarded tmux fallback." >&2
+          else
+            echo "Mailbox envelopes will remain pending." >&2
+          fi
+        fi
+      fi
+    fi
+  fi
 fi
+
+poke_mailbox() {
+  if [ "$MAILBOX_POKE_PROVIDER_AWARE" = "true" ]; then
+    "$MAILBOX_POKE" "$MAILBOX_SELF_ADDRESS" --tmux-session "$SESSION" "$@"
+  else
+    "$MAILBOX_POKE" "$SESSION" "$@"
+  fi
+}
 
 # ---- carry-over prompt -----------------------------------------------------
 # Seeds a freshly rotated session with instructions to rebuild context from the
@@ -313,7 +399,7 @@ fi
 
 if tmux has-session -t "=$SESSION" 2>/dev/null; then
   session_matches_workspace "$SESSION" || refuse_mismatched_session "$SESSION"
-  [ -n "$MAILBOX_POKE" ] && ( "$MAILBOX_POKE" "$SESSION" ) &
+  [ -n "$MAILBOX_POKE" ] && ( poke_mailbox ) &
   if inside_tmux; then
     exec tmux switch-client -t "=$SESSION"
   fi
@@ -621,6 +707,9 @@ PY
     fi
 
     CMD="env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS MAILBOX_SELF_ADDRESS='$MAILBOX_SELF_ADDRESS' $AGENT_BIN"
+    if [ -n "$CLAUDE_MAILBOX_SETTINGS_ARG" ]; then
+      CMD="$CMD --settings $CLAUDE_MAILBOX_SETTINGS_ARG"
+    fi
     if [ "$HAS_SESSION" = "true" ]; then
       CMD="$CMD --continue"
     fi
@@ -680,7 +769,7 @@ if [ -f "$HOME/Library/Keychains/login.keychain-db" ] && command -v security >/d
 fi
 
 echo "Starting $BACKEND in tmux session '$SESSION'..." >&2
-[ -n "$MAILBOX_POKE" ] && ( "$MAILBOX_POKE" "$SESSION" --wait ) &
+[ -n "$MAILBOX_POKE" ] && ( poke_mailbox --wait ) &
 
 # Type the carry-over prompt once the CLI is up. A single Enter often fails to
 # submit in Copilot's input box, so press it until the input box is empty.
