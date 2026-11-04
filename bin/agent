@@ -473,11 +473,14 @@ def read_session(directory):
             return None, "skipped"
     return None, "unstable"
 
-def ranked_session(fields):
+def ranked_session(fields, directory):
     if fields is None:
         return None
     session_id = fields.get("id", "")
     if fields.get("cwd") != workspace or not session_id or session_id in retired:
+        return None
+    if (os.path.lexists(os.path.join(directory, "rotation.barrier")) or
+            os.path.lexists(os.path.join(root, session_id, "rotation.barrier"))):
         return None
     rank = (fields.get("summary_count", "") not in ("", "0"),
             fields.get("updated_at", ""))
@@ -514,7 +517,8 @@ with ThreadPoolExecutor(max_workers=8) as readers:
         counts[state] += 1
         if entry is not None:
             entries[os.path.basename(directories[index - 1])] = entry
-        result = ranked_session(entry["fields"] if entry is not None else None)
+        result = ranked_session(entry["fields"] if entry is not None else None,
+                                directories[index - 1])
         now = time.monotonic()
         if now - last_progress >= 2:
             print(f"  Scanned {index:,}/{len(directories):,} session directories...",
@@ -531,9 +535,10 @@ if counts["unstable"]:
     selected, best = "", None
     counts = dict.fromkeys(("reused", "read", "skipped", "unstable"), 0)
     with ThreadPoolExecutor(max_workers=8) as readers:
-        for fields in readers.map(lambda directory: read_fields(directory, workspace), directories):
+        for directory, fields in zip(directories, readers.map(
+                lambda directory: read_fields(directory, workspace), directories)):
             counts["skipped" if fields is None else "read"] += 1
-            result = ranked_session(fields)
+            result = ranked_session(fields, directory)
             if result is not None:
                 rank, session_id = result
                 if best is None or rank > best:
@@ -556,6 +561,11 @@ PY
 
     if [ -z "$UUID" ]; then
       UUID="$(python3 -c "import uuid,sys; print(uuid.uuid5(uuid.NAMESPACE_URL, 'remote-agent-stack/'+sys.argv[1]))" "$NAME")"
+    fi
+    if [ -e "$SESSION_STATE_DIR/$UUID/rotation.barrier" ] ||
+       [ -L "$SESSION_STATE_DIR/$UUID/rotation.barrier" ] ||
+       { [ -s "$RETIRED_FILE" ] && grep -qxF "$UUID" "$RETIRED_FILE"; }; then
+      UUID="$(uuidgen | tr 'A-Z' 'a-z')"
     fi
 
     # ---- offer to retire an oversized session ------------------------------
