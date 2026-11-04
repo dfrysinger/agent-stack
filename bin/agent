@@ -25,10 +25,231 @@
 #     claude : --dangerously-skip-permissions
 #     codex  : --dangerously-bypass-approvals-and-sandbox
 #   MAILBOX_INTEGRATION      default: false
+#   MAILBOX_SCRIPTS_DIR      optional absolute mailbox scripts directory
 #   SESSION_WARN_MB          default: 300  (copilot only; 0 disables)
 #     Offer to retire a session whose event log has grown past this size.
 
 set -euo pipefail
+
+codex_mailbox_cleanup() {
+  trap - EXIT INT TERM HUP
+  for _pid in "${CODEX_MONITOR_PID:-}" "${CODEX_TUI_PID:-}" "${CODEX_WATCHER_PID:-}" "${CODEX_SERVER_PID:-}"; do
+    [ -n "$_pid" ] || continue
+    kill "$_pid" 2>/dev/null || true
+  done
+  for _pid in "${CODEX_MONITOR_PID:-}" "${CODEX_TUI_PID:-}" "${CODEX_WATCHER_PID:-}" "${CODEX_SERVER_PID:-}"; do
+    [ -n "$_pid" ] || continue
+    wait "$_pid" 2>/dev/null || true
+  done
+}
+
+monitor_codex_mailbox_children() {
+  local launcher_pid="$1" tui_pid="$2" server_pid="$3" watcher_pid="$4"
+  local pane_identity
+  while kill -0 "$launcher_pid" 2>/dev/null; do
+    if [ -n "${TMUX_PANE:-}" ]; then
+      pane_identity="$(
+        tmux display-message -p -t "$TMUX_PANE" '#{pane_id}' 2>/dev/null || true
+      )"
+      if [ "$pane_identity" != "$TMUX_PANE" ]; then
+        kill "$tui_pid" "$watcher_pid" "$server_pid" 2>/dev/null || true
+        kill "$launcher_pid" 2>/dev/null || true
+        return 1
+      fi
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      echo "agent-stack: managed Codex app-server exited; stopping its clients." >&2
+      kill "$tui_pid" "$watcher_pid" 2>/dev/null || true
+      kill "$launcher_pid" 2>/dev/null || true
+      return 1
+    fi
+    if ! kill -0 "$watcher_pid" 2>/dev/null; then
+      echo "agent-stack: managed Codex mailbox watcher exited; stopping the session." >&2
+      kill "$tui_pid" "$server_pid" 2>/dev/null || true
+      kill "$launcher_pid" 2>/dev/null || true
+      return 1
+    fi
+    kill -0 "$tui_pid" 2>/dev/null || return 0
+    sleep 0.2
+  done
+}
+
+inspect_codex_listener() {
+  local pid="$1"
+  if [ -n "${CODEX_LISTENER_INSPECTOR:-}" ]; then
+    "$CODEX_LISTENER_INSPECTOR" "$pid"
+    return
+  fi
+  /usr/sbin/lsof -nP -a -p "$pid" -iTCP -sTCP:LISTEN -F n 2>/dev/null |
+    awk 'substr($0, 1, 1) == "n" { print substr($0, 2) }'
+}
+
+run_codex_mailbox_launcher() {
+  [ $# -eq 7 ] || {
+    echo "agent-stack: invalid managed Codex launch." >&2
+    return 2
+  }
+  local codex_bin="$1" node_bin="$2" watcher="$3" workspace="$4"
+  local self_address="$5" allow_all="$6" has_session="$7"
+  local token token_hash listeners listener endpoint="" count attempt
+  local tui_status tui_job
+  local max_attempts="${CODEX_LISTENER_ATTEMPTS:-100}"
+  local retry_delay="${CODEX_LISTENER_DELAY_SECONDS:-0.1}"
+
+  token="$(
+    if [ -n "${CODEX_TOKEN_GENERATOR:-}" ]; then
+      "$CODEX_TOKEN_GENERATOR"
+    else
+      "$node_bin" -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))'
+    fi
+  )"
+  [ -n "$token" ] && [ "${token#*$'\n'}" = "$token" ] || {
+    echo "agent-stack: could not create the managed Codex capability." >&2
+    return 1
+  }
+  token_hash="$(printf '%s' "$token" | /usr/bin/shasum -a 256 | awk '{print $1}')"
+  [ -n "$token_hash" ] || {
+    echo "agent-stack: could not hash the managed Codex capability." >&2
+    return 1
+  }
+
+  CODEX_SERVER_PID=""
+  CODEX_WATCHER_PID=""
+  CODEX_TUI_PID=""
+  CODEX_MONITOR_PID=""
+  trap codex_mailbox_cleanup EXIT
+  trap 'exit 130' INT TERM HUP
+
+  MAILBOX_SELF_ADDRESS="$self_address" \
+  "$codex_bin" app-server \
+    --listen ws://127.0.0.1:0 \
+    --ws-auth capability-token \
+    --ws-token-sha256 "$token_hash" </dev/null >/dev/null 2>&1 &
+  CODEX_SERVER_PID=$!
+
+  attempt=0
+  while [ "$attempt" -lt "$max_attempts" ]; do
+    kill -0 "$CODEX_SERVER_PID" 2>/dev/null || {
+      echo "agent-stack: managed Codex app-server exited before binding loopback." >&2
+      return 1
+    }
+    listeners="$(inspect_codex_listener "$CODEX_SERVER_PID" || true)"
+    count=0
+    endpoint=""
+    while IFS= read -r listener; do
+      [ -n "$listener" ] || continue
+      count=$((count + 1))
+      if printf '%s\n' "$listener" | grep -Eq '^127\.0\.0\.1:[0-9]+$'; then
+        endpoint="ws://$listener"
+      else
+        endpoint=""
+      fi
+    done <<EOF
+$listeners
+EOF
+    if [ "$count" -eq 1 ] && [ -n "$endpoint" ]; then
+      break
+    fi
+    if [ "$count" -gt 0 ]; then
+      echo "agent-stack: managed Codex listener ownership is ambiguous; no client started." >&2
+      return 1
+    fi
+    attempt=$((attempt + 1))
+    sleep "$retry_delay"
+  done
+  if [ -z "$endpoint" ]; then
+    echo "agent-stack: managed Codex loopback listener was not proven; no client started." >&2
+    return 1
+  fi
+  kill -0 "$CODEX_SERVER_PID" 2>/dev/null || {
+    echo "agent-stack: managed Codex app-server exited after listener discovery." >&2
+    return 1
+  }
+
+  MAILBOX_SELF_ADDRESS="$self_address" \
+  CODEX_APP_SERVER_ENDPOINT="$endpoint" \
+  CODEX_APP_SERVER_TOKEN="$token" \
+  CODEX_WORKSPACE="$workspace" \
+  CODEX_LAUNCHER_PID="$$" \
+  CODEX_ALLOW_ALL="$allow_all" \
+    "$node_bin" "$watcher" </dev/null &
+  CODEX_WATCHER_PID=$!
+  sleep 0.1
+  kill -0 "$CODEX_WATCHER_PID" 2>/dev/null || {
+    echo "agent-stack: managed Codex mailbox watcher did not start." >&2
+    return 1
+  }
+
+  [ -t 0 ] && set -m
+  if [ "$has_session" = "true" ]; then
+    MAILBOX_SELF_ADDRESS="$self_address" \
+    CODEX_AGENT_STACK_REMOTE_TOKEN="$token" \
+      "$codex_bin" resume --last --cd "$workspace" \
+      --remote "$endpoint" \
+      --remote-auth-token-env CODEX_AGENT_STACK_REMOTE_TOKEN &
+  else
+    MAILBOX_SELF_ADDRESS="$self_address" \
+    CODEX_AGENT_STACK_REMOTE_TOKEN="$token" \
+      "$codex_bin" -c ephemeral=false --cd "$workspace" \
+      --remote "$endpoint" \
+      --remote-auth-token-env CODEX_AGENT_STACK_REMOTE_TOKEN &
+  fi
+  CODEX_TUI_PID=$!
+
+  if [ -t 0 ]; then
+    tui_job="$(
+      jobs -l |
+        awk -v pid="$CODEX_TUI_PID" '
+          $2 == pid {
+            job = $1
+            gsub(/[^0-9]/, "", job)
+            print job
+            exit
+          }'
+    )"
+    [ -n "$tui_job" ] || {
+      echo "agent-stack: could not foreground the managed Codex TUI." >&2
+      return 1
+    }
+    monitor_codex_mailbox_children \
+      "$$" "$CODEX_TUI_PID" "$CODEX_SERVER_PID" "$CODEX_WATCHER_PID" &
+    CODEX_MONITOR_PID=$!
+    set +e
+    fg "%$tui_job"
+    tui_status=$?
+    set -e
+    kill "$CODEX_MONITOR_PID" 2>/dev/null || true
+    wait "$CODEX_MONITOR_PID" 2>/dev/null || true
+    CODEX_MONITOR_PID=""
+    set +m
+    return "$tui_status"
+  fi
+
+  while :; do
+    if ! kill -0 "$CODEX_SERVER_PID" 2>/dev/null; then
+      echo "agent-stack: managed Codex app-server exited; stopping its clients." >&2
+      return 1
+    fi
+    if ! kill -0 "$CODEX_WATCHER_PID" 2>/dev/null; then
+      echo "agent-stack: managed Codex mailbox watcher exited; stopping the session." >&2
+      return 1
+    fi
+    if ! kill -0 "$CODEX_TUI_PID" 2>/dev/null; then
+      set +e
+      wait "$CODEX_TUI_PID"
+      tui_status=$?
+      set -e
+      return "$tui_status"
+    fi
+    sleep 0.2
+  done
+}
+
+if [ "${1:-}" = "--internal-codex-mailbox-launch" ]; then
+  shift
+  run_codex_mailbox_launcher "$@"
+  exit $?
+fi
 
 # ---- backend dispatch + args -----------------------------------------------
 
@@ -69,7 +290,8 @@ Config:
   ~/.config/remote-agent-stack/config
   Env: COPILOT_WORKSPACE_BASE, CLAUDE_WORKSPACE_BASE, CODEX_WORKSPACE_BASE,
        COPILOT_BIN, CLAUDE_BIN, CODEX_BIN, AGENT_DIR_PREFIX, ALLOW_ALL,
-       MAILBOX_INTEGRATION, COPILOT_TASK_WAIT_TIMEOUT_SECONDS
+       MAILBOX_INTEGRATION, MAILBOX_SCRIPTS_DIR,
+       COPILOT_TASK_WAIT_TIMEOUT_SECONDS
 USAGE
 }
 
@@ -210,15 +432,130 @@ fi
 # MAILBOX_INTEGRATION is not set to "true" in config.
 
 MAILBOX_POKE=""
+MAILBOX_POKE_PROVIDER_AWARE=false
+CLAUDE_MAILBOX_SETTINGS_ARG=""
+CODEX_NATIVE_MAILBOX=false
+CODEX_MAILBOX_WATCHER=""
 if [ "${MAILBOX_INTEGRATION:-false}" = "true" ]; then
-  for _p in \
-    "$HOME/.copilot/installed-plugins/_direct/dfrysinger--skills/skills/mailbox/scripts/mailbox-poke.sh" \
-    "$HOME/.claude/plugins/repos/dfrysinger/skills/skills/mailbox/scripts/mailbox-poke.sh" \
-    "$HOME/code/skills/skills/mailbox/scripts/mailbox-poke.sh" \
-    "$HOME/.copilot/skills/mailbox/scripts/mailbox-poke.sh"; do
-    [ -x "$_p" ] && { MAILBOX_POKE="$_p"; break; }
-  done
+  if [ -n "${MAILBOX_SCRIPTS_DIR:-}" ]; then
+    [ -x "$MAILBOX_SCRIPTS_DIR/mailbox-poke.sh" ] &&
+      MAILBOX_POKE="$MAILBOX_SCRIPTS_DIR/mailbox-poke.sh"
+  else
+    for _p in \
+      "$HOME/.copilot/installed-plugins/_direct/dfrysinger--skills/skills/mailbox/scripts/mailbox-poke.sh" \
+      "$HOME/.claude/plugins/repos/dfrysinger/skills/skills/mailbox/scripts/mailbox-poke.sh" \
+      "$HOME/code/skills/skills/mailbox/scripts/mailbox-poke.sh" \
+      "$HOME/.copilot/skills/mailbox/scripts/mailbox-poke.sh"; do
+      [ -x "$_p" ] && { MAILBOX_POKE="$_p"; break; }
+    done
+  fi
+  if [ -n "$MAILBOX_POKE" ] && grep -Fq -- "--tmux-session" "$MAILBOX_POKE"; then
+    MAILBOX_POKE_PROVIDER_AWARE=true
+  fi
+  NODE_BIN="$(command -v node 2>/dev/null || true)"
+
+  if [ "$BACKEND" = "claude" ]; then
+    CLAUDE_MAILBOX_HOOK=""
+    if [ -n "${MAILBOX_SCRIPTS_DIR:-}" ]; then
+      CLAUDE_MAILBOX_ROOT="$MAILBOX_SCRIPTS_DIR"
+    else
+      for _p in \
+        "$HOME/.copilot/installed-plugins/_direct/dfrysinger--skills/skills/mailbox/scripts/claude-mailbox-hook.mjs" \
+        "$HOME/.claude/plugins/marketplaces/dfrysinger-skills/skills/mailbox/scripts/claude-mailbox-hook.mjs" \
+        "$HOME/code/skills/skills/mailbox/scripts/claude-mailbox-hook.mjs" \
+        "$HOME/.copilot/skills/mailbox/scripts/claude-mailbox-hook.mjs"; do
+        [ -f "$_p" ] && { CLAUDE_MAILBOX_ROOT="$(dirname "$_p")"; break; }
+      done
+    fi
+    if [ -n "${CLAUDE_MAILBOX_ROOT:-}" ] &&
+       [ -f "$CLAUDE_MAILBOX_ROOT/claude-mailbox-hook.mjs" ] &&
+       [ -f "$CLAUDE_MAILBOX_ROOT/claude-mailbox-adapter.mjs" ] &&
+       [ -f "$CLAUDE_MAILBOX_ROOT/claude-mailbox-watcher.mjs" ] &&
+       [ -f "$CLAUDE_MAILBOX_ROOT/mailbox-core.mjs" ] &&
+       [ -f "$CLAUDE_MAILBOX_ROOT/../../../extensions/session-control/diagnostics.mjs" ]; then
+      CLAUDE_MAILBOX_HOOK="$CLAUDE_MAILBOX_ROOT/claude-mailbox-hook.mjs"
+    fi
+    if [ -z "$CLAUDE_MAILBOX_HOOK" ]; then
+      echo "Warning: native Claude mailbox delivery is unavailable." >&2
+      if [ "$MAILBOX_POKE_PROVIDER_AWARE" = "true" ] && [ -n "$NODE_BIN" ]; then
+        echo "Upgrade or reinstall the dfrysinger/skills plugin; using the guarded tmux fallback." >&2
+      else
+        echo "Upgrade or reinstall the dfrysinger/skills plugin; mailbox envelopes will remain pending." >&2
+      fi
+    else
+      if [ -z "$NODE_BIN" ]; then
+        echo "Warning: native Claude mailbox delivery requires Node.js in PATH." >&2
+        echo "Mailbox envelopes will remain pending until Node.js is available." >&2
+      else
+        if CLAUDE_MAILBOX_SETTINGS="$(
+          python3 - "$NODE_BIN" "$CLAUDE_MAILBOX_HOOK" <<'PY'
+import json
+import shlex
+import sys
+
+node, hook = sys.argv[1:]
+print(json.dumps({
+    "hooks": {
+        "SessionStart": [{
+            "hooks": [{
+                "type": "command",
+                "command": shlex.join([node, hook]),
+            }],
+        }],
+    },
+}, separators=(",", ":")))
+PY
+        )"; then
+          printf -v CLAUDE_MAILBOX_SETTINGS_ARG '%q' "$CLAUDE_MAILBOX_SETTINGS"
+        else
+          echo "Warning: native Claude mailbox settings could not be generated." >&2
+          if [ "$MAILBOX_POKE_PROVIDER_AWARE" = "true" ] && [ -n "$NODE_BIN" ]; then
+            echo "Using the guarded tmux fallback." >&2
+          else
+            echo "Mailbox envelopes will remain pending." >&2
+          fi
+        fi
+      fi
+    fi
+  elif [ "$BACKEND" = "codex" ] && [ "$(uname -s)" = "Darwin" ]; then
+    CODEX_MAILBOX_ROOT=""
+    if [ -n "${MAILBOX_SCRIPTS_DIR:-}" ]; then
+      CODEX_MAILBOX_ROOT="$MAILBOX_SCRIPTS_DIR"
+    else
+      for _p in \
+        "$HOME/.copilot/installed-plugins/_direct/dfrysinger--skills/skills/mailbox/scripts/codex-mailbox-watcher.mjs" \
+        "$HOME/.claude/plugins/marketplaces/dfrysinger-skills/skills/mailbox/scripts/codex-mailbox-watcher.mjs" \
+        "$HOME/code/skills/skills/mailbox/scripts/codex-mailbox-watcher.mjs" \
+        "$HOME/.copilot/skills/mailbox/scripts/codex-mailbox-watcher.mjs"; do
+        [ -f "$_p" ] && { CODEX_MAILBOX_ROOT="$(dirname "$_p")"; break; }
+      done
+    fi
+    if [ -n "$CODEX_MAILBOX_ROOT" ] &&
+       [ -f "$CODEX_MAILBOX_ROOT/codex-mailbox-watcher.mjs" ] &&
+       [ -f "$CODEX_MAILBOX_ROOT/codex-mailbox-adapter.mjs" ] &&
+       [ -f "$CODEX_MAILBOX_ROOT/mailbox-core.mjs" ] &&
+       [ -f "$CODEX_MAILBOX_ROOT/../../../extensions/session-control/diagnostics.mjs" ] &&
+       [ -n "$NODE_BIN" ]; then
+      CODEX_MAILBOX_WATCHER="$CODEX_MAILBOX_ROOT/codex-mailbox-watcher.mjs"
+      CODEX_NATIVE_MAILBOX=true
+    else
+      echo "Warning: native Codex mailbox delivery is unavailable." >&2
+      if [ "$MAILBOX_POKE_PROVIDER_AWARE" = "true" ] && [ -n "$NODE_BIN" ]; then
+        echo "Upgrade or reinstall the dfrysinger/skills plugin; using the guarded tmux fallback." >&2
+      else
+        echo "Upgrade or reinstall the dfrysinger/skills plugin; mailbox envelopes will remain pending." >&2
+      fi
+    fi
+  fi
 fi
+
+poke_mailbox() {
+  if [ "$MAILBOX_POKE_PROVIDER_AWARE" = "true" ]; then
+    "$MAILBOX_POKE" "$MAILBOX_SELF_ADDRESS" --tmux-session "$SESSION" "$@"
+  else
+    "$MAILBOX_POKE" "$SESSION" "$@"
+  fi
+}
 
 # ---- carry-over prompt -----------------------------------------------------
 # Seeds a freshly rotated session with instructions to rebuild context from the
@@ -313,7 +650,9 @@ fi
 
 if tmux has-session -t "=$SESSION" 2>/dev/null; then
   session_matches_workspace "$SESSION" || refuse_mismatched_session "$SESSION"
-  [ -n "$MAILBOX_POKE" ] && ( "$MAILBOX_POKE" "$SESSION" ) &
+  if [ -n "$MAILBOX_POKE" ] && [ "$CODEX_NATIVE_MAILBOX" != "true" ]; then
+    ( poke_mailbox ) &
+  fi
   if inside_tmux; then
     exec tmux switch-client -t "=$SESSION"
   fi
@@ -631,6 +970,9 @@ PY
     fi
 
     CMD="env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS MAILBOX_SELF_ADDRESS='$MAILBOX_SELF_ADDRESS' $AGENT_BIN"
+    if [ -n "$CLAUDE_MAILBOX_SETTINGS_ARG" ]; then
+      CMD="$CMD --settings $CLAUDE_MAILBOX_SETTINGS_ARG"
+    fi
     if [ "$HAS_SESSION" = "true" ]; then
       CMD="$CMD --continue"
     fi
@@ -671,12 +1013,28 @@ PY
       HAS_SESSION=true
     fi
 
-    CMD="env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS MAILBOX_SELF_ADDRESS='$MAILBOX_SELF_ADDRESS' $AGENT_BIN"
-    if [ "$HAS_SESSION" = "true" ]; then
-      CMD="$CMD resume --last"
-    fi
-    if [ "${ALLOW_ALL:-false}" = "true" ]; then
-      CMD="$CMD --dangerously-bypass-approvals-and-sandbox"
+    if [ "$CODEX_NATIVE_MAILBOX" = "true" ]; then
+      printf -v _agent_q '%q' "$0"
+      printf -v _codex_q '%q' "$(command -v "$AGENT_BIN")"
+      printf -v _node_q '%q' "$NODE_BIN"
+      printf -v _watcher_q '%q' "$CODEX_MAILBOX_WATCHER"
+      printf -v _workspace_q '%q' "$DIR"
+      printf -v _address_q '%q' "$MAILBOX_SELF_ADDRESS"
+      _codex_allow_all=false
+      [ "${ALLOW_ALL:-false}" = "true" ] && _codex_allow_all=true
+      printf -v _allow_all_q '%q' "$_codex_allow_all"
+      printf -v _has_session_q '%q' "$HAS_SESSION"
+      CMD="env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS $_agent_q --internal-codex-mailbox-launch"
+      CMD="$CMD $_codex_q $_node_q $_watcher_q $_workspace_q $_address_q"
+      CMD="$CMD $_allow_all_q $_has_session_q"
+    else
+      CMD="env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS MAILBOX_SELF_ADDRESS='$MAILBOX_SELF_ADDRESS' $AGENT_BIN"
+      if [ "$HAS_SESSION" = "true" ]; then
+        CMD="$CMD resume --last"
+      fi
+      if [ "${ALLOW_ALL:-false}" = "true" ]; then
+        CMD="$CMD --dangerously-bypass-approvals-and-sandbox"
+      fi
     fi
     ;;
 esac
@@ -690,7 +1048,9 @@ if [ -f "$HOME/Library/Keychains/login.keychain-db" ] && command -v security >/d
 fi
 
 echo "Starting $BACKEND in tmux session '$SESSION'..." >&2
-[ -n "$MAILBOX_POKE" ] && ( "$MAILBOX_POKE" "$SESSION" --wait ) &
+if [ -n "$MAILBOX_POKE" ] && [ "$CODEX_NATIVE_MAILBOX" != "true" ]; then
+  ( poke_mailbox --wait ) &
+fi
 
 # Type the carry-over prompt once the CLI is up. A single Enter often fails to
 # submit in Copilot's input box, so press it until the input box is empty.

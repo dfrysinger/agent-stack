@@ -749,6 +749,7 @@ SCREEN_SHARING_HOURS="1"                                           # automatic b
 # CLAUDE_BIN="claude"
 # CODEX_BIN="codex"
 # AGENT_DIR_PREFIX="agent-"
+# MAILBOX_SCRIPTS_DIR="/absolute/path/to/skills/mailbox/scripts"
 # SESSION_WARN_MB="300"
 ```
 
@@ -773,9 +774,15 @@ option or edit the file directly to move a
 root.
 
 `MAILBOX_INTEGRATION` enables the cross-session
-[mailbox](https://github.com/dfrysinger/skills) skill — the wrapper pokes the
-recipient's pane on attach + cold-start when pending mail exists. Off
+[mailbox](https://github.com/dfrysinger/skills) skill. Copilot uses its session
+control API. Claude uses an authenticated SessionStart child when the installed
+mailbox scripts support it. If native delivery is unavailable, Agent Stack
+keeps the guarded tmux fallback and prints upgrade guidance. The setting is off
 unless you have the skill installed.
+
+`MAILBOX_SCRIPTS_DIR` selects an exact mailbox scripts directory. Normal
+installations discover the scripts automatically; this setting is useful for a
+local or staged Skills candidate.
 
 `ALLOW_ALL` makes the wrapper skip permission prompts on new-session
 launch — Copilot: `--allow-all` (auto-approves tools, paths, URLs);
