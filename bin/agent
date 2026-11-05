@@ -1186,11 +1186,11 @@ fi
 if inside_tmux; then
   if [ "$BACKEND" = "claude" ] && [ -n "$CLAUDE_MAILBOX_SETTINGS_ARG" ]; then
     tmux new-session -d -s "$SESSION" -c "$DIR" \
-      \; set-option -t "=$SESSION" @agent_stack_native_claude_mailbox true \
+      \; set-option -t "$SESSION" @agent_stack_native_claude_mailbox true \
       \; send-keys -t "$SESSION" "$CMD" Enter
   elif [ "$BACKEND" = "codex" ] && [ "$CODEX_NATIVE_MAILBOX" = "true" ]; then
     tmux new-session -d -s "$SESSION" -c "$DIR" \
-      \; set-option -t "=$SESSION" @agent_stack_native_codex_mailbox true \
+      \; set-option -t "$SESSION" @agent_stack_native_codex_mailbox true \
       \; send-keys -t "$SESSION" "$CMD" Enter
   else
     tmux new-session -d -s "$SESSION" -c "$DIR" \; send-keys -t "$SESSION" "$CMD" Enter
@@ -1201,11 +1201,11 @@ fi
 require_terminal
 if [ "$BACKEND" = "claude" ] && [ -n "$CLAUDE_MAILBOX_SETTINGS_ARG" ]; then
   exec tmux new-session -s "$SESSION" -c "$DIR" \
-    \; set-option -t "=$SESSION" @agent_stack_native_claude_mailbox true \
+    \; set-option -t "$SESSION" @agent_stack_native_claude_mailbox true \
     \; send-keys "$CMD" Enter
 elif [ "$BACKEND" = "codex" ] && [ "$CODEX_NATIVE_MAILBOX" = "true" ]; then
   exec tmux new-session -s "$SESSION" -c "$DIR" \
-    \; set-option -t "=$SESSION" @agent_stack_native_codex_mailbox true \
+    \; set-option -t "$SESSION" @agent_stack_native_codex_mailbox true \
     \; send-keys "$CMD" Enter
 fi
 exec tmux new-session -s "$SESSION" -c "$DIR" \; send-keys "$CMD" Enter

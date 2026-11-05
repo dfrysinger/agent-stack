@@ -400,12 +400,13 @@ MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" claude mailbox
 assert_contains "$LOG" "MAILBOX_SELF_ADDRESS=claude:mailbox claude --settings"
 assert_contains "$LOG" "claude-mailbox-hook.mjs"
 assert_contains "$LOG" "MAILBOX_SCRIPTS_DIR=$MAILBOX_DIR"
+assert_contains "$LOG" "set-option -t mailbox @agent_stack_native_claude_mailbox true"
 assert_not_contains "$LOG" "CLAUDE_CODE_MESSAGING_TOKEN"
 assert_not_contains "$AUX_LOG" "mailbox|claude:mailbox"
 
 : >"$LOG"
 : >"$AUX_LOG"
-MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" claude mailbox
+MAILBOX_INTEGRATION=true run_agent_without_tmux "$BIN_DIR/agent-stack" claude mailbox
 assert_contains "$LOG" "attach"
 assert_not_contains "$AUX_LOG" "mailbox|claude:mailbox"
 
@@ -428,13 +429,14 @@ MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" codex native-mailbox
 assert_contains "$LOG" "--internal-codex-mailbox-launch"
 assert_contains "$LOG" "$MAILBOX_DIR/codex-mailbox-watcher.mjs"
 assert_contains "$LOG" "codex:native-mailbox"
+assert_contains "$LOG" "set-option -t native-mailbox @agent_stack_native_codex_mailbox true"
 assert_contains "$LOG" "false false"
 assert_not_contains "$LOG" "--dangerously-bypass-approvals-and-sandbox"
 assert_not_contains "$AUX_LOG" "mailbox|codex:native-mailbox"
 
 : >"$LOG"
 : >"$AUX_LOG"
-MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" codex native-mailbox
+MAILBOX_INTEGRATION=true run_agent_without_tmux "$BIN_DIR/agent-stack" codex native-mailbox
 assert_contains "$LOG" "attach"
 assert_not_contains "$AUX_LOG" "mailbox|codex:native-mailbox"
 
