@@ -979,7 +979,14 @@ try {
             $tui = Start-JobProcess $codexJob $executable (
                 $tuiArguments.ToArray()
             ) $workspace $tuiEnvironment
-            $tui.WaitForExit()
+            while (-not $tui.WaitForExit(200)) {
+                if ($server.HasExited) {
+                    throw "Managed Codex app-server exited while the TUI was running."
+                }
+                if ($watcher.HasExited) {
+                    throw "Managed Codex mailbox watcher exited while the TUI was running."
+                }
+            }
             $exitCode = $tui.ExitCode
         } else {
             & $executable @($childArguments.ToArray())

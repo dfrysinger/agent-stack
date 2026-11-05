@@ -12,16 +12,26 @@ BIN_DIR="$TMP/bin"
 STATE_DIR="$TMP/tmux"
 LOG="$TMP/tmux.log"
 AUX_LOG="$TMP/aux.log"
-mkdir -p "$HOME_DIR" "$BIN_DIR" "$STATE_DIR/sessions"
+mkdir -p "$HOME_DIR" "$BIN_DIR" "$STATE_DIR/sessions" "$STATE_DIR/options"
 
 for name in agent-stack copilot-agent claude-agent codex-agent agent ca cc co remote-agent mystery-agent; do
   ln -s "$WRAPPER" "$BIN_DIR/$name"
 done
 
-for name in copilot claude codex; do
+for name in copilot claude; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN_DIR/$name"
   chmod +x "$BIN_DIR/$name"
 done
+cat >"$BIN_DIR/codex" <<'CODEX'
+#!/usr/bin/env bash
+if [ "${1:-}" = "app-server" ] && [ "${2:-}" = "--help" ]; then
+  echo "--listen --ws-token-sha256"
+elif [ "${1:-}" = "--help" ]; then
+  echo "--remote --remote-auth-token-env"
+fi
+exit 0
+CODEX
+chmod +x "$BIN_DIR/codex"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN_DIR/node"
 chmod +x "$BIN_DIR/node"
 
@@ -56,6 +66,19 @@ case "$command" in
     esac
     cat "$FAKE_TMUX_STATE/sessions/$target"
     ;;
+  show-options)
+    target=""
+    option="${*: -1}"
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) target="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    target="${target#=}"
+    [ -f "$FAKE_TMUX_STATE/options/$target/$option" ] &&
+      cat "$FAKE_TMUX_STATE/options/$target/$option"
+    ;;
   new-session)
     session=""
     directory=""
@@ -68,6 +91,16 @@ case "$command" in
       esac
     done
     printf '%s\n' "$directory" > "$FAKE_TMUX_STATE/sessions/$session"
+    if [[ " $args " == *" @agent_stack_native_claude_mailbox true "* ]]; then
+      mkdir -p "$FAKE_TMUX_STATE/options/$session"
+      printf 'true\n' > \
+        "$FAKE_TMUX_STATE/options/$session/@agent_stack_native_claude_mailbox"
+    fi
+    if [[ " $args " == *" @agent_stack_native_codex_mailbox true "* ]]; then
+      mkdir -p "$FAKE_TMUX_STATE/options/$session"
+      printf 'true\n' > \
+        "$FAKE_TMUX_STATE/options/$session/@agent_stack_native_codex_mailbox"
+    fi
     printf 'new-session|%s|%s|%s\n' "$session" "$directory" "$args" >> "$FAKE_TMUX_LOG"
     ;;
   switch-client|attach)
@@ -128,8 +161,8 @@ run_agent_without_tmux() {
 }
 
 reset_tmux() {
-  rm -rf "$STATE_DIR/sessions"
-  mkdir -p "$STATE_DIR/sessions"
+  rm -rf "$STATE_DIR/sessions" "$STATE_DIR/options"
+  mkdir -p "$STATE_DIR/sessions" "$STATE_DIR/options"
   : > "$LOG"
   : > "$AUX_LOG"
 }
@@ -191,9 +224,9 @@ for backend in copilot claude codex; do
   assert_contains "$LOG" "$backend"
   if [ "$backend" = "copilot" ]; then
     assert_not_contains "$LOG" "--remote"
-    assert_contains "$LOG" "env MAILBOX_SELF_ADDRESS='copilot:alpha' COPILOT_TASK_WAIT_TIMEOUT_SECONDS='3600' copilot"
+    assert_contains "$LOG" "env MAILBOX_SELF_ADDRESS=copilot:alpha COPILOT_TASK_WAIT_TIMEOUT_SECONDS='3600' copilot"
   else
-    assert_contains "$LOG" "env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS MAILBOX_SELF_ADDRESS='$backend:alpha' $backend"
+    assert_contains "$LOG" "env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS MAILBOX_SELF_ADDRESS=$backend:alpha $backend"
   fi
   if [ "$backend" = "codex" ]; then
     assert_not_contains "$LOG" "resume --last"
@@ -207,6 +240,10 @@ for backend in copilot claude codex; do
     exit 1
   }
 done
+
+reset_tmux
+run_agent "$BIN_DIR/agent-stack" copilot "o'brien"
+assert_contains "$LOG" "MAILBOX_SELF_ADDRESS=copilot:o\\'brien"
 
 reset_tmux
 mkdir -p "$COPILOT_BASE/agent-alpha"
@@ -360,9 +397,28 @@ for file in claude-mailbox-hook.mjs claude-mailbox-adapter.mjs \
   printf '// Test fixture.\n' >"$MAILBOX_DIR/$file"
 done
 MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" claude mailbox
-assert_contains "$LOG" "MAILBOX_SELF_ADDRESS='claude:mailbox' claude --settings"
+assert_contains "$LOG" "MAILBOX_SELF_ADDRESS=claude:mailbox claude --settings"
 assert_contains "$LOG" "claude-mailbox-hook.mjs"
+assert_contains "$LOG" "MAILBOX_SCRIPTS_DIR=$MAILBOX_DIR"
 assert_not_contains "$LOG" "CLAUDE_CODE_MESSAGING_TOKEN"
+assert_not_contains "$AUX_LOG" "mailbox|claude:mailbox"
+
+: >"$LOG"
+: >"$AUX_LOG"
+MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" claude mailbox
+assert_contains "$LOG" "attach"
+assert_not_contains "$AUX_LOG" "mailbox|claude:mailbox"
+
+reset_tmux
+printf '%s\n' "$CLAUDE_BASE/agent-legacy-native-mailbox" \
+  >"$STATE_DIR/sessions/claude-legacy-native-mailbox"
+MAILBOX_INTEGRATION=true \
+  run_agent "$BIN_DIR/agent-stack" claude legacy-native-mailbox
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  grep -Fq "mailbox|claude:legacy-native-mailbox" "$AUX_LOG" 2>/dev/null && break
+  sleep 0.1
+done
+assert_contains "$AUX_LOG" "mailbox|claude:legacy-native-mailbox"
 
 reset_tmux
 for file in codex-mailbox-watcher.mjs codex-mailbox-adapter.mjs; do
@@ -376,6 +432,23 @@ assert_contains "$LOG" "false false"
 assert_not_contains "$LOG" "--dangerously-bypass-approvals-and-sandbox"
 assert_not_contains "$AUX_LOG" "mailbox|codex:native-mailbox"
 
+: >"$LOG"
+: >"$AUX_LOG"
+MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" codex native-mailbox
+assert_contains "$LOG" "attach"
+assert_not_contains "$AUX_LOG" "mailbox|codex:native-mailbox"
+
+reset_tmux
+printf '%s\n' "$CODEX_BASE/agent-legacy-native-mailbox" \
+  >"$STATE_DIR/sessions/codex-legacy-native-mailbox"
+MAILBOX_INTEGRATION=true \
+  run_agent "$BIN_DIR/agent-stack" codex legacy-native-mailbox
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  grep -Fq "mailbox|codex:legacy-native-mailbox" "$AUX_LOG" 2>/dev/null && break
+  sleep 0.1
+done
+assert_contains "$AUX_LOG" "mailbox|codex:legacy-native-mailbox"
+
 reset_tmux
 mkdir -p "$HOME_DIR/.codex/sessions/2026/11/04"
 printf '{"type":"session_meta","payload":{"cwd":"%s"}}\n' \
@@ -386,6 +459,17 @@ MAILBOX_INTEGRATION=true ALLOW_ALL=true \
 assert_contains "$LOG" "--internal-codex-mailbox-launch"
 assert_contains "$LOG" "true true"
 assert_not_contains "$LOG" "--dangerously-bypass-approvals-and-sandbox"
+
+cp "$BIN_DIR/codex" "$BIN_DIR/codex-supported"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN_DIR/codex"
+chmod +x "$BIN_DIR/codex"
+reset_tmux
+MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" codex unsupported-native \
+  >"$TMP/stdout" 2>"$TMP/stderr"
+assert_not_contains "$LOG" "--internal-codex-mailbox-launch"
+assert_contains "$TMP/stderr" "Upgrade Codex"
+assert_contains "$TMP/stderr" "guarded tmux fallback"
+mv "$BIN_DIR/codex-supported" "$BIN_DIR/codex"
 
 reset_tmux
 rm "$MAILBOX_DIR/claude-mailbox-watcher.mjs"
@@ -456,7 +540,7 @@ MAILBOX_INTEGRATION=true MAILBOX_SCRIPTS_DIR="$INCOMPLETE_CODEX_DIR" \
   run_agent "$BIN_DIR/agent-stack" codex codex-fallback \
   >"$TMP/stdout" 2>"$TMP/stderr"
 assert_not_contains "$LOG" "--internal-codex-mailbox-launch"
-assert_contains "$LOG" "MAILBOX_SELF_ADDRESS='codex:codex-fallback' codex"
+assert_contains "$LOG" "MAILBOX_SELF_ADDRESS=codex:codex-fallback codex"
 assert_contains "$TMP/stderr" "using the guarded tmux fallback"
 
 reset_tmux
@@ -501,6 +585,7 @@ if [ "${1:-}" = "app-server" ]; then
 fi
 printf 'tui|%s|token-set=%s\n' "$*" "${CODEX_AGENT_STACK_REMOTE_TOKEN:+true}" \
   >>"$NATIVE_LOG"
+printf 'tui-scripts|%s\n' "${MAILBOX_SCRIPTS_DIR:-}" >>"$NATIVE_LOG"
 exit 0
 NATIVE_CODEX
 chmod +x "$BIN_DIR/native-codex"
@@ -575,6 +660,7 @@ assert_contains "$NATIVE_LOG" \
   "watcher|$MAILBOX_DIR/codex-mailbox-watcher.mjs|endpoint=ws://127.0.0.1:43123|token-set=true"
 assert_contains "$NATIVE_LOG" \
   "tui|-c ephemeral=false --cd $CODEX_BASE/agent-native --remote ws://127.0.0.1:43123 --remote-auth-token-env CODEX_AGENT_STACK_REMOTE_TOKEN|token-set=true"
+assert_contains "$NATIVE_LOG" "tui-scripts|$MAILBOX_DIR"
 assert_not_contains "$NATIVE_LOG" "$CANARY_TOKEN"
 assert_not_contains "$TMP/stdout" "$CANARY_TOKEN"
 assert_not_contains "$TMP/stderr" "$CANARY_TOKEN"
@@ -641,12 +727,12 @@ cat > "$TMP/config/remote-agent-stack/config" <<'EOF'
 COPILOT_TASK_WAIT_TIMEOUT_SECONDS="1200"
 EOF
 run_agent "$BIN_DIR/agent-stack" copilot timeout-config
-assert_contains "$LOG" "env MAILBOX_SELF_ADDRESS='copilot:timeout-config' COPILOT_TASK_WAIT_TIMEOUT_SECONDS='1200' copilot"
+assert_contains "$LOG" "env MAILBOX_SELF_ADDRESS=copilot:timeout-config COPILOT_TASK_WAIT_TIMEOUT_SECONDS='1200' copilot"
 
 reset_tmux
 COPILOT_TASK_WAIT_TIMEOUT_SECONDS=1800 \
   run_agent "$BIN_DIR/agent-stack" copilot timeout-override
-assert_contains "$LOG" "env MAILBOX_SELF_ADDRESS='copilot:timeout-override' COPILOT_TASK_WAIT_TIMEOUT_SECONDS='1800' copilot"
+assert_contains "$LOG" "env MAILBOX_SELF_ADDRESS=copilot:timeout-override COPILOT_TASK_WAIT_TIMEOUT_SECONDS='1800' copilot"
 
 reset_tmux
 COPILOT_TASK_WAIT_TIMEOUT_SECONDS= \

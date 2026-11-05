@@ -70,7 +70,9 @@ function Invoke-Launcher {
         [string]$Stderr = $script:stderrPath,
         [int]$FakeExit = 0,
         [int]$CodexServerExit = 0,
-        [int]$CodexWatcherExit = 0
+        [int]$CodexWatcherExit = 0,
+        [int]$CodexServerLifetimeMs = 0,
+        [string]$FakeRelease = ""
     )
 
     Remove-Item -LiteralPath (
@@ -86,11 +88,12 @@ function Invoke-Launcher {
     $env:FAKE_AGENT_CAPTURE = $Capture
     $env:FAKE_AGENT_EXIT = [string]$FakeExit
     $env:FAKE_AGENT_READY = ""
-    $env:FAKE_AGENT_RELEASE = ""
+    $env:FAKE_AGENT_RELEASE = $FakeRelease
     $env:FAKE_AGENT_CHILD_PIDS = $script:childPidsPath
     $env:FAKE_CODEX_SERVER_CAPTURE = $script:serverCapturePath
     $env:FAKE_CODEX_WATCHER_CAPTURE = $script:watcherCapturePath
     $env:FAKE_CODEX_SERVER_EXIT = [string]$CodexServerExit
+    $env:FAKE_CODEX_SERVER_LIFETIME_MS = [string]$CodexServerLifetimeMs
     $env:FAKE_CODEX_WATCHER_EXIT = [string]$CodexWatcherExit
 
     & $script:pwsh -NoProfile -ExecutionPolicy Bypass -File $script:launcher @Arguments `
@@ -114,6 +117,7 @@ $stdoutPath = Join-Path $root "stdout.txt"
 $stderrPath = Join-Path $root "stderr.txt"
 $fakeScript = Join-Path $root "fake-provider.mjs"
 $fakeCommand = Join-Path $root "fake-provider.cmd"
+$fakePowerShellCommand = Join-Path $root "fake-provider.ps1"
 $copilotRoot = Join-Path $root "copilot"
 $claudeRoot = Join-Path $root "claude"
 $codexRoot = Join-Path $root "codex"
@@ -135,6 +139,7 @@ $savedEnvironment = @{
     FAKE_CODEX_SERVER_CAPTURE = $env:FAKE_CODEX_SERVER_CAPTURE
     FAKE_CODEX_WATCHER_CAPTURE = $env:FAKE_CODEX_WATCHER_CAPTURE
     FAKE_CODEX_SERVER_EXIT = $env:FAKE_CODEX_SERVER_EXIT
+    FAKE_CODEX_SERVER_LIFETIME_MS = $env:FAKE_CODEX_SERVER_LIFETIME_MS
     FAKE_CODEX_WATCHER_EXIT = $env:FAKE_CODEX_WATCHER_EXIT
     COPILOT_HOME = $env:COPILOT_HOME
     CLAUDE_CONFIG_DIR = $env:CLAUDE_CONFIG_DIR
@@ -196,6 +201,8 @@ if (args[0] === "app-server") {
     Number(endpoint.port),
     endpoint.hostname,
   );
+  const lifetime = Number(process.env.FAKE_CODEX_SERVER_LIFETIME_MS ?? "0");
+  if (lifetime > 0) setTimeout(() => process.exit(12), lifetime);
   setInterval(() => {}, 1_000);
 } else {
 const settingsIndex = args.indexOf("--settings");
@@ -230,6 +237,10 @@ process.exit(Number(process.env.FAKE_AGENT_EXIT ?? "0"));
     Set-Content -LiteralPath $fakeCommand -Encoding ascii -Value @'
 @echo off
 node "%~dp0fake-provider.mjs" %*
+'@
+    Set-Content -LiteralPath $fakePowerShellCommand -Encoding utf8 -Value @'
+& node (Join-Path $PSScriptRoot "fake-provider.mjs") @args
+exit $LASTEXITCODE
 '@
 
     $env:COPILOT_HOME = $copilotHome
@@ -379,6 +390,10 @@ node "%~dp0fake-provider.mjs" %*
         "Claude temporary mailbox settings were not removed"
     )
 
+    $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+    $config.CODEX_BIN = $fakePowerShellCommand
+    $config | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding utf8
+
     $exitCode = Invoke-Launcher @("codex", "allow")
     Assert-Equal $exitCode 0 "Codex allow launch"
     $capture = Read-Capture
@@ -438,6 +453,19 @@ node "%~dp0fake-provider.mjs" %*
     Assert-True ((Get-Content $stderrPath -Raw).Contains(
         "synthetic watcher startup failure"
     )) "Codex watcher diagnostic missing"
+
+    $release = Join-Path $root "hold-tui"
+    $exitCode = Invoke-Launcher @("codex", "runtime-server-failure") `
+        -CodexServerLifetimeMs 1500 -FakeRelease $release
+    Assert-Equal $exitCode 1 "Codex runtime app-server failure exit"
+    Assert-True ((Get-Content $stderrPath -Raw).Contains(
+        "Managed Codex app-server exited while the TUI was running"
+    )) "Codex runtime app-server failure was not detected"
+    foreach ($childPid in Get-Content -LiteralPath $childPidsPath) {
+        Assert-True ($null -eq (
+            Get-Process -Id ([int]$childPid) -ErrorAction SilentlyContinue
+        )) "Codex runtime failure left child $childPid running"
+    }
 
     $exitCode = Invoke-Launcher @("codex", "tui-failure") `
         -FakeExit 7

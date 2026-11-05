@@ -23,14 +23,24 @@ try {
 
 $startInfo = [Diagnostics.ProcessStartInfo]::new()
 $startInfo.UseShellExecute = $false
-$startInfo.FileName = $request.filePath
+$providerArguments = @($request.arguments)
+if ([IO.Path]::GetExtension([string]$request.filePath) -ieq ".ps1") {
+    $startInfo.FileName = Join-Path $PSHOME "pwsh.exe"
+    [void]$startInfo.ArgumentList.Add("-NoProfile")
+    [void]$startInfo.ArgumentList.Add("-ExecutionPolicy")
+    [void]$startInfo.ArgumentList.Add("Bypass")
+    [void]$startInfo.ArgumentList.Add("-File")
+    [void]$startInfo.ArgumentList.Add([string]$request.filePath)
+} else {
+    $startInfo.FileName = $request.filePath
+}
 $startInfo.WorkingDirectory = $request.workingDirectory
 $startInfo.CreateNoWindow = [bool]$request.background
 if ($request.background) {
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
 }
-foreach ($argument in $request.arguments) {
+foreach ($argument in $providerArguments) {
     [void]$startInfo.ArgumentList.Add([string]$argument)
 }
 foreach ($entry in $request.environment.PSObject.Properties) {

@@ -33,6 +33,8 @@ set -euo pipefail
 
 codex_mailbox_cleanup() {
   trap - EXIT INT TERM HUP
+  terminate_codex_process_tree \
+    "${CODEX_TUI_PID:-}" "${CODEX_WATCHER_PID:-}" "${CODEX_SERVER_PID:-}"
   for _pid in "${CODEX_MONITOR_PID:-}" "${CODEX_TUI_PID:-}" "${CODEX_WATCHER_PID:-}" "${CODEX_SERVER_PID:-}"; do
     [ -n "$_pid" ] || continue
     kill "$_pid" 2>/dev/null || true
@@ -72,16 +74,72 @@ monitor_codex_mailbox_children() {
     kill -0 "$tui_pid" 2>/dev/null || return 0
     sleep 0.2
   done
+  terminate_codex_process_tree "$tui_pid" "$watcher_pid" "$server_pid"
+  return 1
+}
+
+codex_process_tree() {
+  local root_pid="$1" processes tree previous pid parent
+  processes="$(ps -axo pid=,ppid= 2>/dev/null)" || return 1
+  tree=" $root_pid "
+  while :; do
+    previous="$tree"
+    while read -r pid parent; do
+      [ -n "$pid" ] && [ -n "$parent" ] || continue
+      case "$tree" in
+        *" $parent "*)
+          case "$tree" in
+            *" $pid "*) ;;
+            *) tree="$tree$pid " ;;
+          esac
+          ;;
+      esac
+    done <<EOF
+$processes
+EOF
+    [ "$tree" = "$previous" ] && break
+  done
+  printf '%s\n' "$tree" |
+    awk '{ for (i = 1; i <= NF; i++) print $i }'
+}
+
+terminate_codex_process_tree() {
+  local root_pid process_ids pid
+  for root_pid in "$@"; do
+    [ -n "$root_pid" ] || continue
+    process_ids="$(codex_process_tree "$root_pid" 2>/dev/null || printf '%s\n' "$root_pid")"
+    printf '%s\n' "$process_ids" |
+    awk 'NF { pids[++count] = $1 } END { for (i = count; i >= 1; i--) print pids[i] }' |
+    while read -r pid; do
+      kill "$pid" 2>/dev/null || true
+    done
+  done
 }
 
 inspect_codex_listener() {
-  local pid="$1"
+  local pid="$1" process_ids lsof_pids
   if [ -n "${CODEX_LISTENER_INSPECTOR:-}" ]; then
     "$CODEX_LISTENER_INSPECTOR" "$pid"
     return
   fi
-  /usr/sbin/lsof -nP -a -p "$pid" -iTCP -sTCP:LISTEN -F n 2>/dev/null |
+  process_ids="$(codex_process_tree "$pid")" || return 1
+  lsof_pids="$(
+    printf '%s\n' "$process_ids" |
+      awk 'NF { if (result != "") result = result "," $1; else result = $1 } END { print result }'
+  )"
+  [ -n "$lsof_pids" ] || return 1
+  /usr/sbin/lsof -nP -a -p "$lsof_pids" -iTCP -sTCP:LISTEN -F n 2>/dev/null |
     awk 'substr($0, 1, 1) == "n" { print substr($0, 2) }'
+}
+
+codex_native_mailbox_supported() {
+  local codex_bin="$1" app_server_help tui_help
+  app_server_help="$("$codex_bin" app-server --help 2>&1)" || return 1
+  tui_help="$("$codex_bin" --help 2>&1)" || return 1
+  grep -Fq -- "--listen" <<<"$app_server_help" &&
+    grep -Fq -- "--ws-token-sha256" <<<"$app_server_help" &&
+    grep -Fq -- "--remote" <<<"$tui_help" &&
+    grep -Fq -- "--remote-auth-token-env" <<<"$tui_help"
 }
 
 run_codex_mailbox_launcher() {
@@ -92,7 +150,7 @@ run_codex_mailbox_launcher() {
   local codex_bin="$1" node_bin="$2" watcher="$3" workspace="$4"
   local self_address="$5" allow_all="$6" has_session="$7"
   local token token_hash listeners listener endpoint="" count attempt
-  local tui_status tui_job
+  local tui_status tui_job mailbox_scripts_dir
   local max_attempts="${CODEX_LISTENER_ATTEMPTS:-100}"
   local retry_delay="${CODEX_LISTENER_DELAY_SECONDS:-0.1}"
 
@@ -181,20 +239,26 @@ EOF
   }
 
   [ -t 0 ] && set -m
+  mailbox_scripts_dir="$(dirname "$watcher")"
   if [ "$has_session" = "true" ]; then
     MAILBOX_SELF_ADDRESS="$self_address" \
+    MAILBOX_SCRIPTS_DIR="$mailbox_scripts_dir" \
     CODEX_AGENT_STACK_REMOTE_TOKEN="$token" \
       "$codex_bin" resume --last --cd "$workspace" \
       --remote "$endpoint" \
       --remote-auth-token-env CODEX_AGENT_STACK_REMOTE_TOKEN &
   else
     MAILBOX_SELF_ADDRESS="$self_address" \
+    MAILBOX_SCRIPTS_DIR="$mailbox_scripts_dir" \
     CODEX_AGENT_STACK_REMOTE_TOKEN="$token" \
       "$codex_bin" -c ephemeral=false --cd "$workspace" \
       --remote "$endpoint" \
       --remote-auth-token-env CODEX_AGENT_STACK_REMOTE_TOKEN &
   fi
   CODEX_TUI_PID=$!
+  monitor_codex_mailbox_children \
+    "$$" "$CODEX_TUI_PID" "$CODEX_SERVER_PID" "$CODEX_WATCHER_PID" &
+  CODEX_MONITOR_PID=$!
 
   if [ -t 0 ]; then
     tui_job="$(
@@ -211,9 +275,6 @@ EOF
       echo "agent-stack: could not foreground the managed Codex TUI." >&2
       return 1
     }
-    monitor_codex_mailbox_children \
-      "$$" "$CODEX_TUI_PID" "$CODEX_SERVER_PID" "$CODEX_WATCHER_PID" &
-    CODEX_MONITOR_PID=$!
     set +e
     fg "%$tui_job"
     tui_status=$?
@@ -404,6 +465,7 @@ esac
 DIR="$WORKSPACE_BASE/${AGENT_DIR_PREFIX}${NAME}"
 SESSION="${SESSION_PREFIX}${NAME}"
 MAILBOX_SELF_ADDRESS="$BACKEND:$NAME"
+printf -v MAILBOX_SELF_ADDRESS_Q '%q' "$MAILBOX_SELF_ADDRESS"
 
 # ---- preflight -------------------------------------------------------------
 
@@ -535,18 +597,36 @@ PY
        [ -f "$CODEX_MAILBOX_ROOT/codex-mailbox-adapter.mjs" ] &&
        [ -f "$CODEX_MAILBOX_ROOT/mailbox-core.mjs" ] &&
        [ -f "$CODEX_MAILBOX_ROOT/../../../extensions/session-control/diagnostics.mjs" ] &&
-       [ -n "$NODE_BIN" ]; then
+       [ -n "$NODE_BIN" ] &&
+       codex_native_mailbox_supported "$AGENT_BIN"; then
       CODEX_MAILBOX_WATCHER="$CODEX_MAILBOX_ROOT/codex-mailbox-watcher.mjs"
       CODEX_NATIVE_MAILBOX=true
     else
       echo "Warning: native Codex mailbox delivery is unavailable." >&2
       if [ "$MAILBOX_POKE_PROVIDER_AWARE" = "true" ] && [ -n "$NODE_BIN" ]; then
-        echo "Upgrade or reinstall the dfrysinger/skills plugin; using the guarded tmux fallback." >&2
+        echo "Upgrade Codex and reinstall the dfrysinger/skills plugin; using the guarded tmux fallback." >&2
       else
         echo "Upgrade or reinstall the dfrysinger/skills plugin; mailbox envelopes will remain pending." >&2
       fi
     fi
   fi
+fi
+
+ACTIVE_MAILBOX_SCRIPTS_DIR="${MAILBOX_SCRIPTS_DIR:-}"
+if [ -z "$ACTIVE_MAILBOX_SCRIPTS_DIR" ]; then
+  case "$BACKEND" in
+    claude) ACTIVE_MAILBOX_SCRIPTS_DIR="${CLAUDE_MAILBOX_ROOT:-}" ;;
+    codex) ACTIVE_MAILBOX_SCRIPTS_DIR="${CODEX_MAILBOX_ROOT:-}" ;;
+    *)
+      [ -n "$MAILBOX_POKE" ] &&
+        ACTIVE_MAILBOX_SCRIPTS_DIR="$(dirname "$MAILBOX_POKE")"
+      ;;
+  esac
+fi
+MAILBOX_SCRIPTS_ENV=""
+if [ -n "$ACTIVE_MAILBOX_SCRIPTS_DIR" ]; then
+  printf -v ACTIVE_MAILBOX_SCRIPTS_DIR_Q '%q' "$ACTIVE_MAILBOX_SCRIPTS_DIR"
+  MAILBOX_SCRIPTS_ENV=" MAILBOX_SCRIPTS_DIR=$ACTIVE_MAILBOX_SCRIPTS_DIR_Q"
 fi
 
 poke_mailbox() {
@@ -650,7 +730,17 @@ fi
 
 if tmux has-session -t "=$SESSION" 2>/dev/null; then
   session_matches_workspace "$SESSION" || refuse_mismatched_session "$SESSION"
-  if [ -n "$MAILBOX_POKE" ] && [ "$CODEX_NATIVE_MAILBOX" != "true" ]; then
+  SESSION_NATIVE_CLAUDE_MAILBOX="$(
+    tmux show-options -qv -t "=$SESSION" @agent_stack_native_claude_mailbox 2>/dev/null ||
+      true
+  )"
+  SESSION_NATIVE_CODEX_MAILBOX="$(
+    tmux show-options -qv -t "=$SESSION" @agent_stack_native_codex_mailbox 2>/dev/null ||
+      true
+  )"
+  if [ -n "$MAILBOX_POKE" ] &&
+     { [ "$BACKEND" != "claude" ] || [ "$SESSION_NATIVE_CLAUDE_MAILBOX" != "true" ]; } &&
+     { [ "$BACKEND" != "codex" ] || [ "$SESSION_NATIVE_CODEX_MAILBOX" != "true" ]; }; then
     ( poke_mailbox ) &
   fi
   if inside_tmux; then
@@ -947,7 +1037,7 @@ PY
     # is only a cosmetic label on the session anyway. Resume never relies on it
     # — the scan above keys on `cwd`, not `name`, precisely because Copilot's
     # auto-summarizer rewrites session names in place.
-    CMD="env MAILBOX_SELF_ADDRESS='$MAILBOX_SELF_ADDRESS' COPILOT_TASK_WAIT_TIMEOUT_SECONDS='$COPILOT_TASK_WAIT_TIMEOUT_SECONDS' $AGENT_BIN --session-id='$UUID'"
+    CMD="env$MAILBOX_SCRIPTS_ENV MAILBOX_SELF_ADDRESS=$MAILBOX_SELF_ADDRESS_Q COPILOT_TASK_WAIT_TIMEOUT_SECONDS='$COPILOT_TASK_WAIT_TIMEOUT_SECONDS' $AGENT_BIN --session-id='$UUID'"
     if [ "${ALLOW_ALL:-false}" = "true" ]; then
       CMD="$CMD --allow-all"
     fi
@@ -969,7 +1059,7 @@ PY
       done
     fi
 
-    CMD="env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS MAILBOX_SELF_ADDRESS='$MAILBOX_SELF_ADDRESS' $AGENT_BIN"
+    CMD="env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS$MAILBOX_SCRIPTS_ENV MAILBOX_SELF_ADDRESS=$MAILBOX_SELF_ADDRESS_Q $AGENT_BIN"
     if [ -n "$CLAUDE_MAILBOX_SETTINGS_ARG" ]; then
       CMD="$CMD --settings $CLAUDE_MAILBOX_SETTINGS_ARG"
     fi
@@ -1028,7 +1118,7 @@ PY
       CMD="$CMD $_codex_q $_node_q $_watcher_q $_workspace_q $_address_q"
       CMD="$CMD $_allow_all_q $_has_session_q"
     else
-      CMD="env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS MAILBOX_SELF_ADDRESS='$MAILBOX_SELF_ADDRESS' $AGENT_BIN"
+      CMD="env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS$MAILBOX_SCRIPTS_ENV MAILBOX_SELF_ADDRESS=$MAILBOX_SELF_ADDRESS_Q $AGENT_BIN"
       if [ "$HAS_SESSION" = "true" ]; then
         CMD="$CMD resume --last"
       fi
@@ -1048,7 +1138,9 @@ if [ -f "$HOME/Library/Keychains/login.keychain-db" ] && command -v security >/d
 fi
 
 echo "Starting $BACKEND in tmux session '$SESSION'..." >&2
-if [ -n "$MAILBOX_POKE" ] && [ "$CODEX_NATIVE_MAILBOX" != "true" ]; then
+if [ -n "$MAILBOX_POKE" ] &&
+   [ -z "$CLAUDE_MAILBOX_SETTINGS_ARG" ] &&
+   [ "$CODEX_NATIVE_MAILBOX" != "true" ]; then
   ( poke_mailbox --wait ) &
 fi
 
@@ -1092,9 +1184,28 @@ if [ -n "${CARRYOVER_PROMPT:-}" ]; then
 fi
 
 if inside_tmux; then
-  tmux new-session -d -s "$SESSION" -c "$DIR" \; send-keys -t "$SESSION" "$CMD" Enter
+  if [ "$BACKEND" = "claude" ] && [ -n "$CLAUDE_MAILBOX_SETTINGS_ARG" ]; then
+    tmux new-session -d -s "$SESSION" -c "$DIR" \
+      \; set-option -t "=$SESSION" @agent_stack_native_claude_mailbox true \
+      \; send-keys -t "$SESSION" "$CMD" Enter
+  elif [ "$BACKEND" = "codex" ] && [ "$CODEX_NATIVE_MAILBOX" = "true" ]; then
+    tmux new-session -d -s "$SESSION" -c "$DIR" \
+      \; set-option -t "=$SESSION" @agent_stack_native_codex_mailbox true \
+      \; send-keys -t "$SESSION" "$CMD" Enter
+  else
+    tmux new-session -d -s "$SESSION" -c "$DIR" \; send-keys -t "$SESSION" "$CMD" Enter
+  fi
   exec tmux switch-client -t "$SESSION"
 fi
 
 require_terminal
+if [ "$BACKEND" = "claude" ] && [ -n "$CLAUDE_MAILBOX_SETTINGS_ARG" ]; then
+  exec tmux new-session -s "$SESSION" -c "$DIR" \
+    \; set-option -t "=$SESSION" @agent_stack_native_claude_mailbox true \
+    \; send-keys "$CMD" Enter
+elif [ "$BACKEND" = "codex" ] && [ "$CODEX_NATIVE_MAILBOX" = "true" ]; then
+  exec tmux new-session -s "$SESSION" -c "$DIR" \
+    \; set-option -t "=$SESSION" @agent_stack_native_codex_mailbox true \
+    \; send-keys "$CMD" Enter
+fi
 exec tmux new-session -s "$SESSION" -c "$DIR" \; send-keys "$CMD" Enter

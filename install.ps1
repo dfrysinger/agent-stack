@@ -239,6 +239,7 @@ $codexBin = Resolve-ProviderBinary `
     -DefaultCommand "codex" `
     -PackageDirectoryPattern "OpenAI.Codex_*" `
     -ExecutableName "codex-x86_64-pc-windows-msvc.exe"
+$mailboxScriptsDir = [string](Get-ExistingProperty $existingConfig "MAILBOX_SCRIPTS_DIR" "")
 
 & $manager -Mode check -Launcher $launcher -BinDir $BinDir
 if ($LASTEXITCODE -ne 0) {
@@ -265,6 +266,9 @@ $config = [ordered]@{
     ALLOW_ALL = $allowAllValue
     MAILBOX_INTEGRATION = $mailboxValue
     COPILOT_AGENT_MACHINE = $Machine
+}
+if (-not [string]::IsNullOrWhiteSpace($mailboxScriptsDir)) {
+    $config.MAILBOX_SCRIPTS_DIR = $mailboxScriptsDir
 }
 Write-JsonAtomic $configPath $config
 

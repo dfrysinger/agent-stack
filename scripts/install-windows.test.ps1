@@ -83,6 +83,8 @@ try {
     Assert-True (-not [bool]$state.pathAdded) "test unexpectedly changed PATH"
 
     $config.AGENT_DIR_PREFIX = "custom-"
+    $config | Add-Member -NotePropertyName MAILBOX_SCRIPTS_DIR `
+        -NotePropertyValue (Join-Path $root "custom-mailbox-scripts")
     $config | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding utf8
     $state.pathAdded = $true
     $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
@@ -94,6 +96,9 @@ try {
     Assert-True ($config.AGENT_DIR_PREFIX -ceq "custom-") (
         "idempotent install reset the workspace prefix"
     )
+    Assert-True (
+        $config.MAILBOX_SCRIPTS_DIR -ceq (Join-Path $root "custom-mailbox-scripts")
+    ) "idempotent install lost the mailbox scripts directory"
     Assert-True ($state.binDir -ceq $bin) (
         "idempotent install changed the command directory"
     )

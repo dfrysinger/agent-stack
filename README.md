@@ -761,8 +761,9 @@ On Windows, data-only configuration lives separately at:
 
 Environment values override the corresponding JSON properties. Windows
 supports the three workspace roots and binaries, `AGENT_DIR_PREFIX`,
-`ALLOW_ALL`, `MAILBOX_INTEGRATION`, and `COPILOT_AGENT_MACHINE`. The file is
-parsed as JSON and is never executed as PowerShell.
+`ALLOW_ALL`, `MAILBOX_INTEGRATION`, `MAILBOX_SCRIPTS_DIR`, and
+`COPILOT_AGENT_MACHINE`. The file is parsed as JSON and is never executed as
+PowerShell.
 
 The three `*_WORKSPACE_BASE` values are whatever you
 picked at install time (Dropbox defaults if Dropbox is installed,
@@ -786,9 +787,12 @@ local or staged Skills candidate.
 
 `ALLOW_ALL` makes the wrapper skip permission prompts on new-session
 launch — Copilot: `--allow-all` (auto-approves tools, paths, URLs);
-Claude Code: `--dangerously-skip-permissions`; Codex:
-`--dangerously-bypass-approvals-and-sandbox`. Personal-machine
-convenience; do not enable in shared environments.
+Claude Code: `--dangerously-skip-permissions`; legacy Codex:
+`--dangerously-bypass-approvals-and-sandbox`. Codex rejects that flag on its
+native remote TUI path, so the mailbox watcher applies the equivalent policy
+to the exact thread before each queued mailbox turn. Interactive Codex turns
+before the first mailbox delivery retain the provider's default policy.
+Personal-machine convenience; do not enable in shared environments.
 
 `COPILOT_TASK_WAIT_TIMEOUT_SECONDS` controls how long Copilot waits for
 background shells and agents before it ends an autopilot turn. Agent Stack
