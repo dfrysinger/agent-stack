@@ -259,6 +259,9 @@ for backend in copilot claude codex; do
   else
     assert_contains "$LOG" "env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS MAILBOX_SELF_ADDRESS=$backend:alpha $backend"
   fi
+  if [ "$backend" = "claude" ]; then
+    assert_not_contains "$LOG" "crossSessionInbound"
+  fi
   if [ "$backend" = "codex" ]; then
     assert_not_contains "$LOG" "resume --last"
   fi
@@ -431,6 +434,8 @@ MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" claude mailbox
 assert_contains "$LOG" "MAILBOX_SELF_ADDRESS=claude:mailbox claude --settings"
 assert_contains "$LOG" "claude-mailbox-hook.mjs"
 assert_contains "$LOG" "MAILBOX_SCRIPTS_DIR=$MAILBOX_DIR"
+assert_contains "$LOG" "crossSessionInbound"
+assert_contains "$LOG" "accept"
 assert_contains "$LOG" "set-option -t claude-mailbox @agent_stack_native_claude_mailbox true"
 assert_not_contains "$LOG" "CLAUDE_CODE_MESSAGING_TOKEN"
 assert_not_contains "$AUX_LOG" "mailbox|claude:mailbox"

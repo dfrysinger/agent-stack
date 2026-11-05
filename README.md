@@ -781,6 +781,14 @@ mailbox scripts support it. If native delivery is unavailable, Agent Stack
 keeps the guarded tmux fallback and prints upgrade guidance. The setting is off
 unless you have the skill installed.
 
+For a mailbox-enabled Claude launch, Agent Stack also sets
+`crossSessionInbound` to `accept` in that launch's inline `--settings` JSON.
+Claude otherwise holds an unclassified watcher message when the receiving
+session skips permission prompts. This grant applies to every Claude peer that
+the provider accepts for that one session, not only the mailbox watcher. Agent
+Stack does not write user, project, local, or managed Claude settings, and a
+stricter managed `hold` or `refuse` policy still wins.
+
 `MAILBOX_SCRIPTS_DIR` selects an exact mailbox scripts directory. Normal
 installations discover the scripts automatically; this setting is useful for a
 local or staged Skills candidate.

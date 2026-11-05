@@ -858,6 +858,7 @@ if ($backend -eq "copilot") {
             "agent-stack-claude-settings-$PID-$([guid]::NewGuid().ToString('N')).json"
         )
         [ordered]@{
+            crossSessionInbound = "accept"
             hooks = [ordered]@{
                 SessionStart = @(
                     [ordered]@{

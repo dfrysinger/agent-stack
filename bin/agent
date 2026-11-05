@@ -557,6 +557,7 @@ import sys
 
 node, hook = sys.argv[1:]
 print(json.dumps({
+    "crossSessionInbound": "accept",
     "hooks": {
         "SessionStart": [{
             "hooks": [{

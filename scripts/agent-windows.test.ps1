@@ -304,6 +304,9 @@ exit $LASTEXITCODE
     Assert-Equal $exitCode 0 "Claude fresh exit"
     $capture = Read-Capture
     Assert-Equal @($capture.argv) @() "Claude fresh arguments"
+    Assert-Equal $capture.claudeSettings $null (
+        "Claude mailbox settings were added while integration was disabled"
+    )
     $claudeWorkspace = Join-Path $claudeRoot "agent-a-hb"
     Assert-Equal $capture.cwd $claudeWorkspace "Claude encoded workspace"
     Assert-Equal $capture.mailboxSelfAddress "claude:a-b" (
@@ -380,6 +383,9 @@ exit $LASTEXITCODE
     $settingsPath = $capture.argv[$settingsIndex + 1]
     Assert-Equal $capture.claudeSettings.hooks.SessionStart.Count 1 (
         "Claude SessionStart hook count"
+    )
+    Assert-Equal $capture.claudeSettings.crossSessionInbound "accept" (
+        "Claude inbound mailbox policy"
     )
     Assert-True (
         $capture.claudeSettings.hooks.SessionStart[0].hooks[0].command.Contains(
