@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WRAPPER="${WRAPPER:-$ROOT/bin/agent}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+PYTHON3_BIN="$(command -v python3)"
+PTY_RUNNER="$TMP/run-with-pty.py"
 
 HOME_DIR="$TMP/home"
 BIN_DIR="$TMP/bin"
@@ -13,6 +15,19 @@ STATE_DIR="$TMP/tmux"
 LOG="$TMP/tmux.log"
 AUX_LOG="$TMP/aux.log"
 mkdir -p "$HOME_DIR" "$BIN_DIR" "$STATE_DIR/sessions" "$STATE_DIR/options"
+
+cat >"$PTY_RUNNER" <<'PYTHON'
+import os
+import pty
+import sys
+
+status = pty.spawn(sys.argv[1:])
+if os.WIFEXITED(status):
+    raise SystemExit(os.WEXITSTATUS(status))
+if os.WIFSIGNALED(status):
+    raise SystemExit(128 + os.WTERMSIG(status))
+raise SystemExit(1)
+PYTHON
 
 for name in agent-stack copilot-agent claude-agent codex-agent agent ca cc co remote-agent mystery-agent; do
   ln -s "$WRAPPER" "$BIN_DIR/$name"
@@ -158,6 +173,22 @@ run_agent_without_tmux() {
     CODEX_WORKSPACE_BASE="$CODEX_BASE" \
     SESSION_WARN_MB=0 \
     "$@"
+}
+
+run_agent_without_tmux_with_pty() {
+  env -u TMUX \
+    HOME="$HOME_DIR" \
+    XDG_CONFIG_HOME="$TMP/config" \
+    XDG_CACHE_HOME="$TMP/cache" \
+    PATH="$BIN_DIR:/usr/bin:/bin" \
+    FAKE_TMUX_STATE="$STATE_DIR" \
+    FAKE_TMUX_LOG="$LOG" \
+    FAKE_AUX_LOG="$AUX_LOG" \
+    COPILOT_WORKSPACE_BASE="$COPILOT_BASE" \
+    CLAUDE_WORKSPACE_BASE="$CLAUDE_BASE" \
+    CODEX_WORKSPACE_BASE="$CODEX_BASE" \
+    SESSION_WARN_MB=0 \
+    "$PYTHON3_BIN" "$PTY_RUNNER" "$@"
 }
 
 reset_tmux() {
@@ -406,7 +437,8 @@ assert_not_contains "$AUX_LOG" "mailbox|claude:mailbox"
 
 : >"$LOG"
 : >"$AUX_LOG"
-MAILBOX_INTEGRATION=true run_agent_without_tmux "$BIN_DIR/agent-stack" claude mailbox
+MAILBOX_INTEGRATION=true \
+  run_agent_without_tmux_with_pty "$BIN_DIR/agent-stack" claude mailbox
 assert_contains "$LOG" "attach"
 assert_not_contains "$AUX_LOG" "mailbox|claude:mailbox"
 
@@ -436,7 +468,8 @@ assert_not_contains "$AUX_LOG" "mailbox|codex:native-mailbox"
 
 : >"$LOG"
 : >"$AUX_LOG"
-MAILBOX_INTEGRATION=true run_agent_without_tmux "$BIN_DIR/agent-stack" codex native-mailbox
+MAILBOX_INTEGRATION=true \
+  run_agent_without_tmux_with_pty "$BIN_DIR/agent-stack" codex native-mailbox
 assert_contains "$LOG" "attach"
 assert_not_contains "$AUX_LOG" "mailbox|codex:native-mailbox"
 
