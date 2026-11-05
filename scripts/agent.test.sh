@@ -6,22 +6,49 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WRAPPER="${WRAPPER:-$ROOT/bin/agent}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+PYTHON3_BIN="$(command -v python3)"
+PTY_RUNNER="$TMP/run-with-pty.py"
 
 HOME_DIR="$TMP/home"
 BIN_DIR="$TMP/bin"
 STATE_DIR="$TMP/tmux"
 LOG="$TMP/tmux.log"
 AUX_LOG="$TMP/aux.log"
-mkdir -p "$HOME_DIR" "$BIN_DIR" "$STATE_DIR/sessions"
+mkdir -p "$HOME_DIR" "$BIN_DIR" "$STATE_DIR/sessions" "$STATE_DIR/options"
+
+cat >"$PTY_RUNNER" <<'PYTHON'
+import os
+import pty
+import sys
+
+status = pty.spawn(sys.argv[1:])
+if os.WIFEXITED(status):
+    raise SystemExit(os.WEXITSTATUS(status))
+if os.WIFSIGNALED(status):
+    raise SystemExit(128 + os.WTERMSIG(status))
+raise SystemExit(1)
+PYTHON
 
 for name in agent-stack copilot-agent claude-agent codex-agent agent ca cc co remote-agent mystery-agent; do
   ln -s "$WRAPPER" "$BIN_DIR/$name"
 done
 
-for name in copilot claude codex; do
+for name in copilot claude; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN_DIR/$name"
   chmod +x "$BIN_DIR/$name"
 done
+cat >"$BIN_DIR/codex" <<'CODEX'
+#!/usr/bin/env bash
+if [ "${1:-}" = "app-server" ] && [ "${2:-}" = "--help" ]; then
+  echo "--listen --ws-token-sha256"
+elif [ "${1:-}" = "--help" ]; then
+  echo "--remote --remote-auth-token-env"
+fi
+exit 0
+CODEX
+chmod +x "$BIN_DIR/codex"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN_DIR/node"
+chmod +x "$BIN_DIR/node"
 
 cat > "$BIN_DIR/security" <<'FAKE_SECURITY'
 #!/usr/bin/env bash
@@ -54,6 +81,19 @@ case "$command" in
     esac
     cat "$FAKE_TMUX_STATE/sessions/$target"
     ;;
+  show-options)
+    target=""
+    option="${*: -1}"
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) target="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    target="${target#=}"
+    [ -f "$FAKE_TMUX_STATE/options/$target/$option" ] &&
+      cat "$FAKE_TMUX_STATE/options/$target/$option"
+    ;;
   new-session)
     session=""
     directory=""
@@ -66,6 +106,16 @@ case "$command" in
       esac
     done
     printf '%s\n' "$directory" > "$FAKE_TMUX_STATE/sessions/$session"
+    if [[ " $args " == *" @agent_stack_native_claude_mailbox true "* ]]; then
+      mkdir -p "$FAKE_TMUX_STATE/options/$session"
+      printf 'true\n' > \
+        "$FAKE_TMUX_STATE/options/$session/@agent_stack_native_claude_mailbox"
+    fi
+    if [[ " $args " == *" @agent_stack_native_codex_mailbox true "* ]]; then
+      mkdir -p "$FAKE_TMUX_STATE/options/$session"
+      printf 'true\n' > \
+        "$FAKE_TMUX_STATE/options/$session/@agent_stack_native_codex_mailbox"
+    fi
     printf 'new-session|%s|%s|%s\n' "$session" "$directory" "$args" >> "$FAKE_TMUX_LOG"
     ;;
   switch-client|attach)
@@ -125,9 +175,25 @@ run_agent_without_tmux() {
     "$@"
 }
 
+run_agent_without_tmux_with_pty() {
+  env -u TMUX \
+    HOME="$HOME_DIR" \
+    XDG_CONFIG_HOME="$TMP/config" \
+    XDG_CACHE_HOME="$TMP/cache" \
+    PATH="$BIN_DIR:/usr/bin:/bin" \
+    FAKE_TMUX_STATE="$STATE_DIR" \
+    FAKE_TMUX_LOG="$LOG" \
+    FAKE_AUX_LOG="$AUX_LOG" \
+    COPILOT_WORKSPACE_BASE="$COPILOT_BASE" \
+    CLAUDE_WORKSPACE_BASE="$CLAUDE_BASE" \
+    CODEX_WORKSPACE_BASE="$CODEX_BASE" \
+    SESSION_WARN_MB=0 \
+    "$PYTHON3_BIN" "$PTY_RUNNER" "$@"
+}
+
 reset_tmux() {
-  rm -rf "$STATE_DIR/sessions"
-  mkdir -p "$STATE_DIR/sessions"
+  rm -rf "$STATE_DIR/sessions" "$STATE_DIR/options"
+  mkdir -p "$STATE_DIR/sessions" "$STATE_DIR/options"
   : > "$LOG"
   : > "$AUX_LOG"
 }
@@ -189,9 +255,12 @@ for backend in copilot claude codex; do
   assert_contains "$LOG" "$backend"
   if [ "$backend" = "copilot" ]; then
     assert_not_contains "$LOG" "--remote"
-    assert_contains "$LOG" "env COPILOT_TASK_WAIT_TIMEOUT_SECONDS='3600' copilot"
+    assert_contains "$LOG" "env MAILBOX_SELF_ADDRESS=copilot:alpha COPILOT_TASK_WAIT_TIMEOUT_SECONDS='3600' copilot"
   else
-    assert_contains "$LOG" "env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS $backend"
+    assert_contains "$LOG" "env -u COPILOT_TASK_WAIT_TIMEOUT_SECONDS MAILBOX_SELF_ADDRESS=$backend:alpha $backend"
+  fi
+  if [ "$backend" = "claude" ]; then
+    assert_not_contains "$LOG" "crossSessionInbound"
   fi
   if [ "$backend" = "codex" ]; then
     assert_not_contains "$LOG" "resume --last"
@@ -205,6 +274,10 @@ for backend in copilot claude codex; do
     exit 1
   }
 done
+
+reset_tmux
+run_agent "$BIN_DIR/agent-stack" copilot "o'brien"
+assert_contains "$LOG" "MAILBOX_SELF_ADDRESS=copilot:o\\'brien"
 
 reset_tmux
 mkdir -p "$COPILOT_BASE/agent-alpha"
@@ -335,19 +408,193 @@ assert_contains "$AUX_LOG" "security|unlock-keychain"
 assert_contains "$TMP/stderr" "Unlocking the login keychain"
 
 reset_tmux
-MAILBOX_DIR="$HOME_DIR/.copilot/installed-plugins/_direct/dfrysinger--skills/skills/mailbox/scripts"
-mkdir -p "$MAILBOX_DIR"
+MAILBOX_REPO_ROOT="$HOME_DIR/.copilot/installed-plugins/_direct/dfrysinger--skills"
+MAILBOX_DIR="$MAILBOX_REPO_ROOT/skills/mailbox/scripts"
+mkdir -p "$MAILBOX_DIR" "$MAILBOX_REPO_ROOT/extensions/session-control"
+printf '// Test fixture.\n' >"$MAILBOX_REPO_ROOT/extensions/session-control/diagnostics.mjs"
 cat > "$MAILBOX_DIR/mailbox-poke.sh" <<'MAILBOX'
 #!/usr/bin/env bash
+# supports --tmux-session
 printf 'mailbox|%s\n' "$*" >> "$FAKE_AUX_LOG"
 MAILBOX
 chmod +x "$MAILBOX_DIR/mailbox-poke.sh"
 MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" copilot mailbox
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  grep -Fq "mailbox|mailbox --wait" "$AUX_LOG" 2>/dev/null && break
+  grep -Fq "mailbox|copilot:mailbox --tmux-session mailbox --wait" "$AUX_LOG" 2>/dev/null && break
   sleep 0.1
 done
-assert_contains "$AUX_LOG" "mailbox|mailbox --wait"
+assert_contains "$AUX_LOG" "mailbox|copilot:mailbox --tmux-session mailbox --wait"
+
+reset_tmux
+for file in claude-mailbox-hook.mjs claude-mailbox-adapter.mjs \
+  claude-mailbox-watcher.mjs mailbox-core.mjs; do
+  printf '// Test fixture.\n' >"$MAILBOX_DIR/$file"
+done
+MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" claude mailbox
+assert_contains "$LOG" "MAILBOX_SELF_ADDRESS=claude:mailbox claude --settings"
+assert_contains "$LOG" "claude-mailbox-hook.mjs"
+assert_contains "$LOG" "MAILBOX_SCRIPTS_DIR=$MAILBOX_DIR"
+assert_contains "$LOG" "crossSessionInbound"
+assert_contains "$LOG" "accept"
+assert_contains "$LOG" "set-option -t claude-mailbox @agent_stack_native_claude_mailbox true"
+assert_not_contains "$LOG" "CLAUDE_CODE_MESSAGING_TOKEN"
+assert_not_contains "$AUX_LOG" "mailbox|claude:mailbox"
+
+: >"$LOG"
+: >"$AUX_LOG"
+MAILBOX_INTEGRATION=true \
+  run_agent_without_tmux_with_pty "$BIN_DIR/agent-stack" claude mailbox
+assert_contains "$LOG" "attach"
+assert_not_contains "$AUX_LOG" "mailbox|claude:mailbox"
+
+reset_tmux
+printf '%s\n' "$CLAUDE_BASE/agent-legacy-native-mailbox" \
+  >"$STATE_DIR/sessions/claude-legacy-native-mailbox"
+MAILBOX_INTEGRATION=true \
+  run_agent "$BIN_DIR/agent-stack" claude legacy-native-mailbox
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  grep -Fq "mailbox|claude:legacy-native-mailbox" "$AUX_LOG" 2>/dev/null && break
+  sleep 0.1
+done
+assert_contains "$AUX_LOG" "mailbox|claude:legacy-native-mailbox"
+
+reset_tmux
+for file in codex-mailbox-watcher.mjs codex-mailbox-adapter.mjs; do
+  printf '// Test fixture.\n' >"$MAILBOX_DIR/$file"
+done
+MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" codex native-mailbox
+assert_contains "$LOG" "--internal-codex-mailbox-launch"
+assert_contains "$LOG" "$MAILBOX_DIR/codex-mailbox-watcher.mjs"
+assert_contains "$LOG" "codex:native-mailbox"
+assert_contains "$LOG" "set-option -t codex-native-mailbox @agent_stack_native_codex_mailbox true"
+assert_contains "$LOG" "false false"
+assert_not_contains "$LOG" "--dangerously-bypass-approvals-and-sandbox"
+assert_not_contains "$AUX_LOG" "mailbox|codex:native-mailbox"
+
+: >"$LOG"
+: >"$AUX_LOG"
+MAILBOX_INTEGRATION=true \
+  run_agent_without_tmux_with_pty "$BIN_DIR/agent-stack" codex native-mailbox
+assert_contains "$LOG" "attach"
+assert_not_contains "$AUX_LOG" "mailbox|codex:native-mailbox"
+
+reset_tmux
+printf '%s\n' "$CODEX_BASE/agent-legacy-native-mailbox" \
+  >"$STATE_DIR/sessions/codex-legacy-native-mailbox"
+MAILBOX_INTEGRATION=true \
+  run_agent "$BIN_DIR/agent-stack" codex legacy-native-mailbox
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  grep -Fq "mailbox|codex:legacy-native-mailbox" "$AUX_LOG" 2>/dev/null && break
+  sleep 0.1
+done
+assert_contains "$AUX_LOG" "mailbox|codex:legacy-native-mailbox"
+
+reset_tmux
+mkdir -p "$HOME_DIR/.codex/sessions/2026/11/04"
+printf '{"type":"session_meta","payload":{"cwd":"%s"}}\n' \
+  "$CODEX_BASE/agent-native-resume" \
+  > "$HOME_DIR/.codex/sessions/2026/11/04/native-resume.jsonl"
+MAILBOX_INTEGRATION=true ALLOW_ALL=true \
+  run_agent "$BIN_DIR/agent-stack" codex native-resume
+assert_contains "$LOG" "--internal-codex-mailbox-launch"
+assert_contains "$LOG" "true true"
+assert_not_contains "$LOG" "--dangerously-bypass-approvals-and-sandbox"
+
+cp "$BIN_DIR/codex" "$BIN_DIR/codex-supported"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN_DIR/codex"
+chmod +x "$BIN_DIR/codex"
+reset_tmux
+MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" codex unsupported-native \
+  >"$TMP/stdout" 2>"$TMP/stderr"
+assert_not_contains "$LOG" "--internal-codex-mailbox-launch"
+assert_contains "$TMP/stderr" "Upgrade Codex"
+assert_contains "$TMP/stderr" "guarded tmux fallback"
+mv "$BIN_DIR/codex-supported" "$BIN_DIR/codex"
+
+reset_tmux
+rm "$MAILBOX_DIR/claude-mailbox-watcher.mjs"
+MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" claude fallback \
+  >"$TMP/stdout" 2>"$TMP/stderr"
+assert_not_contains "$LOG" "--settings"
+assert_contains "$TMP/stderr" "using the guarded tmux fallback"
+printf '// Test fixture.\n' >"$MAILBOX_DIR/claude-mailbox-watcher.mjs"
+
+reset_tmux
+CUSTOM_SKILLS_ROOT="$TMP/custom-skills"
+CUSTOM_MAILBOX_DIR="$CUSTOM_SKILLS_ROOT/skills/mailbox/scripts"
+mkdir -p "$CUSTOM_MAILBOX_DIR" "$CUSTOM_SKILLS_ROOT/extensions/session-control"
+printf '// Test fixture.\n' >"$CUSTOM_SKILLS_ROOT/extensions/session-control/diagnostics.mjs"
+cp "$MAILBOX_DIR/mailbox-poke.sh" "$CUSTOM_MAILBOX_DIR/mailbox-poke.sh"
+MAILBOX_INTEGRATION=true MAILBOX_SCRIPTS_DIR="$CUSTOM_MAILBOX_DIR" \
+  run_agent "$BIN_DIR/agent-stack" claude incomplete-candidate \
+  >"$TMP/stdout" 2>"$TMP/stderr"
+assert_not_contains "$LOG" "--settings"
+assert_contains "$TMP/stderr" "using the guarded tmux fallback"
+
+reset_tmux
+EMPTY_MAILBOX_DIR="$TMP/empty-mailbox"
+mkdir -p "$EMPTY_MAILBOX_DIR"
+MAILBOX_INTEGRATION=true MAILBOX_SCRIPTS_DIR="$EMPTY_MAILBOX_DIR" \
+  run_agent "$BIN_DIR/agent-stack" claude pending-only \
+  >"$TMP/stdout" 2>"$TMP/stderr"
+assert_not_contains "$LOG" "--settings"
+assert_contains "$TMP/stderr" "mailbox envelopes will remain pending"
+
+reset_tmux
+for file in claude-mailbox-hook.mjs claude-mailbox-adapter.mjs \
+  claude-mailbox-watcher.mjs mailbox-core.mjs; do
+  cp "$MAILBOX_DIR/$file" "$CUSTOM_MAILBOX_DIR/$file"
+done
+MAILBOX_INTEGRATION=true MAILBOX_SCRIPTS_DIR="$CUSTOM_MAILBOX_DIR" \
+  run_agent "$BIN_DIR/agent-stack" claude custom-mailbox
+assert_contains "$LOG" "$CUSTOM_MAILBOX_DIR/claude-mailbox-hook.mjs"
+
+reset_tmux
+LEGACY_MAILBOX_DIR="$TMP/legacy-mailbox"
+mkdir -p "$LEGACY_MAILBOX_DIR"
+cat >"$LEGACY_MAILBOX_DIR/mailbox-poke.sh" <<'MAILBOX'
+#!/usr/bin/env bash
+printf 'legacy-mailbox|%s\n' "$*" >> "$FAKE_AUX_LOG"
+MAILBOX
+chmod +x "$LEGACY_MAILBOX_DIR/mailbox-poke.sh"
+MAILBOX_INTEGRATION=true MAILBOX_SCRIPTS_DIR="$LEGACY_MAILBOX_DIR" \
+  run_agent "$BIN_DIR/agent-stack" copilot legacy
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  grep -Fq "legacy-mailbox|legacy --wait" "$AUX_LOG" 2>/dev/null && break
+  sleep 0.1
+done
+assert_contains "$AUX_LOG" "legacy-mailbox|legacy --wait"
+
+reset_tmux
+MAILBOX_INTEGRATION=true MAILBOX_SCRIPTS_DIR="$LEGACY_MAILBOX_DIR" \
+  run_agent "$BIN_DIR/agent-stack" claude legacy-claude \
+  >"$TMP/stdout" 2>"$TMP/stderr"
+assert_not_contains "$TMP/stderr" "guarded tmux fallback"
+assert_contains "$TMP/stderr" "mailbox envelopes will remain pending"
+
+reset_tmux
+INCOMPLETE_CODEX_DIR="$TMP/incomplete-codex"
+mkdir -p "$INCOMPLETE_CODEX_DIR"
+cp "$MAILBOX_DIR/mailbox-poke.sh" "$INCOMPLETE_CODEX_DIR/mailbox-poke.sh"
+MAILBOX_INTEGRATION=true MAILBOX_SCRIPTS_DIR="$INCOMPLETE_CODEX_DIR" \
+  run_agent "$BIN_DIR/agent-stack" codex codex-fallback \
+  >"$TMP/stdout" 2>"$TMP/stderr"
+assert_not_contains "$LOG" "--internal-codex-mailbox-launch"
+assert_contains "$LOG" "MAILBOX_SELF_ADDRESS=codex:codex-fallback codex"
+assert_contains "$TMP/stderr" "using the guarded tmux fallback"
+
+reset_tmux
+cat >"$BIN_DIR/python3" <<'PYTHON'
+#!/usr/bin/env bash
+exit 9
+PYTHON
+chmod +x "$BIN_DIR/python3"
+MAILBOX_INTEGRATION=true run_agent "$BIN_DIR/agent-stack" claude python-fallback \
+  >"$TMP/stdout" 2>"$TMP/stderr"
+assert_not_contains "$LOG" "--settings"
+assert_contains "$TMP/stderr" "settings could not be generated"
+assert_contains "$TMP/stderr" "Using the guarded tmux fallback"
+rm "$BIN_DIR/python3"
 
 reset_tmux
 mkdir -p "$HOME_DIR/.claude/projects/$(printf '%s' "$CLAUDE_BASE/agent-alpha" | sed 's|/|-|g')"
@@ -362,18 +609,170 @@ printf '{"type":"session_meta","payload":{"cwd":"%s"}}\n' \
 run_agent "$BIN_DIR/agent-stack" codex alpha
 assert_contains "$LOG" "codex resume --last"
 
+NATIVE_LOG="$TMP/native-codex.log"
+NATIVE_SERVER_PID="$TMP/native-server.pid"
+NATIVE_WATCHER_PID="$TMP/native-watcher.pid"
+NATIVE_ENV_LOG="$TMP/native-env.log"
+CANARY_TOKEN="synthetic-codex-capability-do-not-log"
+cat >"$BIN_DIR/native-codex" <<'NATIVE_CODEX'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "app-server" ]; then
+  printf 'server|%s|self=%s\n' "$*" "${MAILBOX_SELF_ADDRESS:-}" >>"$NATIVE_LOG"
+  printf '%s\n' "$$" >"$NATIVE_SERVER_PID"
+  trap 'exit 0' INT TERM HUP
+  while :; do sleep 1; done
+fi
+printf 'tui|%s|token-set=%s\n' "$*" "${CODEX_AGENT_STACK_REMOTE_TOKEN:+true}" \
+  >>"$NATIVE_LOG"
+printf 'tui-scripts|%s\n' "${MAILBOX_SCRIPTS_DIR:-}" >>"$NATIVE_LOG"
+exit 0
+NATIVE_CODEX
+chmod +x "$BIN_DIR/native-codex"
+
+cat >"$BIN_DIR/native-node" <<'NATIVE_NODE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'watcher|%s|endpoint=%s|token-set=%s|launcher=%s|allow=%s\n' \
+  "$*" "$CODEX_APP_SERVER_ENDPOINT" "${CODEX_APP_SERVER_TOKEN:+true}" \
+  "$CODEX_LAUNCHER_PID" "$CODEX_ALLOW_ALL" >>"$NATIVE_LOG"
+printf '%s\n' "$$" >"$NATIVE_WATCHER_PID"
+trap 'exit 0' INT TERM HUP
+while :; do sleep 1; done
+NATIVE_NODE
+chmod +x "$BIN_DIR/native-node"
+
+cat >"$BIN_DIR/native-listener" <<'NATIVE_LISTENER'
+#!/usr/bin/env bash
+printf 'inspect-pid|%s\n' "$1" >>"$NATIVE_LOG"
+case "${FAKE_LISTENER_MODE:-one}" in
+  one) printf '127.0.0.1:43123\n' ;;
+  multiple) printf '127.0.0.1:43123\n127.0.0.1:43124\n' ;;
+  none) ;;
+esac
+NATIVE_LISTENER
+chmod +x "$BIN_DIR/native-listener"
+
+cat >"$BIN_DIR/native-token" <<NATIVE_TOKEN
+#!/usr/bin/env bash
+printf '%s' '$CANARY_TOKEN'
+NATIVE_TOKEN
+chmod +x "$BIN_DIR/native-token"
+
+cat >"$BIN_DIR/env" <<'NATIVE_ENV'
+#!/usr/bin/env bash
+for argument in "$@"; do
+  case "$argument" in
+    CODEX_APP_SERVER_TOKEN=*|CODEX_AGENT_STACK_REMOTE_TOKEN=*)
+      printf 'token-on-env-argv\n' >>"$NATIVE_ENV_LOG"
+      ;;
+  esac
+done
+exec /usr/bin/env "$@"
+NATIVE_ENV
+chmod +x "$BIN_DIR/env"
+: >"$NATIVE_ENV_LOG"
+
+run_native_launcher() {
+  /usr/bin/env \
+    PATH="$BIN_DIR:/usr/bin:/bin" \
+    NATIVE_LOG="$NATIVE_LOG" \
+    NATIVE_SERVER_PID="$NATIVE_SERVER_PID" \
+    NATIVE_WATCHER_PID="$NATIVE_WATCHER_PID" \
+    NATIVE_ENV_LOG="$NATIVE_ENV_LOG" \
+    CODEX_LISTENER_INSPECTOR="$BIN_DIR/native-listener" \
+    CODEX_TOKEN_GENERATOR="$BIN_DIR/native-token" \
+    CODEX_LISTENER_ATTEMPTS=2 \
+    CODEX_LISTENER_DELAY_SECONDS=0.01 \
+    "$@"
+}
+
+: >"$NATIVE_LOG"
+run_native_launcher "$WRAPPER" --internal-codex-mailbox-launch \
+  "$BIN_DIR/native-codex" "$BIN_DIR/native-node" \
+  "$MAILBOX_DIR/codex-mailbox-watcher.mjs" "$CODEX_BASE/agent-native" \
+  codex:native false false >"$TMP/stdout" 2>"$TMP/stderr"
+assert_contains "$NATIVE_LOG" \
+  "server|app-server --listen ws://127.0.0.1:0 --ws-auth capability-token --ws-token-sha256"
+assert_contains "$NATIVE_LOG" "|self=codex:native"
+assert_contains "$NATIVE_LOG" "inspect-pid|$(cat "$NATIVE_SERVER_PID")"
+assert_contains "$NATIVE_LOG" \
+  "watcher|$MAILBOX_DIR/codex-mailbox-watcher.mjs|endpoint=ws://127.0.0.1:43123|token-set=true"
+assert_contains "$NATIVE_LOG" \
+  "tui|-c ephemeral=false --cd $CODEX_BASE/agent-native --remote ws://127.0.0.1:43123 --remote-auth-token-env CODEX_AGENT_STACK_REMOTE_TOKEN|token-set=true"
+assert_contains "$NATIVE_LOG" "tui-scripts|$MAILBOX_DIR"
+assert_not_contains "$NATIVE_LOG" "$CANARY_TOKEN"
+assert_not_contains "$TMP/stdout" "$CANARY_TOKEN"
+assert_not_contains "$TMP/stderr" "$CANARY_TOKEN"
+assert_not_contains "$NATIVE_ENV_LOG" "token-on-env-argv"
+! kill -0 "$(cat "$NATIVE_SERVER_PID")" 2>/dev/null
+! kill -0 "$(cat "$NATIVE_WATCHER_PID")" 2>/dev/null
+
+: >"$NATIVE_LOG"
+run_native_launcher "$WRAPPER" --internal-codex-mailbox-launch \
+  "$BIN_DIR/native-codex" "$BIN_DIR/native-node" \
+  "$MAILBOX_DIR/codex-mailbox-watcher.mjs" "$CODEX_BASE/agent-native" \
+  codex:native true true >"$TMP/stdout" 2>"$TMP/stderr"
+assert_contains "$NATIVE_LOG" \
+  "tui|resume --last --cd $CODEX_BASE/agent-native --remote ws://127.0.0.1:43123 --remote-auth-token-env CODEX_AGENT_STACK_REMOTE_TOKEN|token-set=true"
+assert_contains "$NATIVE_LOG" "|allow=true"
+assert_not_contains "$NATIVE_LOG" "$CANARY_TOKEN"
+assert_not_contains "$NATIVE_ENV_LOG" "token-on-env-argv"
+
+: >"$NATIVE_LOG"
+assert_fails_with_native() {
+  set +e
+  FAKE_LISTENER_MODE=multiple run_native_launcher \
+    "$WRAPPER" --internal-codex-mailbox-launch \
+    "$BIN_DIR/native-codex" "$BIN_DIR/native-node" \
+    "$MAILBOX_DIR/codex-mailbox-watcher.mjs" "$CODEX_BASE/agent-native" \
+    codex:native false true >"$TMP/stdout" 2>"$TMP/stderr"
+  status=$?
+  set -e
+  [ "$status" -eq 1 ] || {
+    echo "expected ambiguous listener launch to fail, got $status" >&2
+    exit 1
+  }
+}
+assert_fails_with_native
+assert_contains "$TMP/stderr" "listener ownership is ambiguous; no client started"
+assert_not_contains "$NATIVE_LOG" "watcher|"
+assert_not_contains "$NATIVE_LOG" "tui|"
+assert_not_contains "$NATIVE_LOG" "$CANARY_TOKEN"
+assert_not_contains "$NATIVE_ENV_LOG" "token-on-env-argv"
+! kill -0 "$(cat "$NATIVE_SERVER_PID")" 2>/dev/null
+
+: >"$NATIVE_ENV_LOG"
+: >"$NATIVE_LOG"
+set +e
+FAKE_LISTENER_MODE=none run_native_launcher \
+  "$WRAPPER" --internal-codex-mailbox-launch \
+  "$BIN_DIR/native-codex" "$BIN_DIR/native-node" \
+  "$MAILBOX_DIR/codex-mailbox-watcher.mjs" "$CODEX_BASE/agent-native" \
+  codex:native false false >"$TMP/stdout" 2>"$TMP/stderr"
+status=$?
+set -e
+[ "$status" -eq 1 ]
+assert_contains "$TMP/stderr" "loopback listener was not proven; no client started"
+assert_not_contains "$NATIVE_LOG" "watcher|"
+assert_not_contains "$NATIVE_LOG" "tui|"
+assert_not_contains "$NATIVE_LOG" "$CANARY_TOKEN"
+assert_not_contains "$NATIVE_ENV_LOG" "token-on-env-argv"
+! kill -0 "$(cat "$NATIVE_SERVER_PID")" 2>/dev/null
+rm "$BIN_DIR/env"
+
 reset_tmux
 mkdir -p "$TMP/config/remote-agent-stack"
 cat > "$TMP/config/remote-agent-stack/config" <<'EOF'
 COPILOT_TASK_WAIT_TIMEOUT_SECONDS="1200"
 EOF
 run_agent "$BIN_DIR/agent-stack" copilot timeout-config
-assert_contains "$LOG" "env COPILOT_TASK_WAIT_TIMEOUT_SECONDS='1200' copilot"
+assert_contains "$LOG" "env MAILBOX_SELF_ADDRESS=copilot:timeout-config COPILOT_TASK_WAIT_TIMEOUT_SECONDS='1200' copilot"
 
 reset_tmux
 COPILOT_TASK_WAIT_TIMEOUT_SECONDS=1800 \
   run_agent "$BIN_DIR/agent-stack" copilot timeout-override
-assert_contains "$LOG" "env COPILOT_TASK_WAIT_TIMEOUT_SECONDS='1800' copilot"
+assert_contains "$LOG" "env MAILBOX_SELF_ADDRESS=copilot:timeout-override COPILOT_TASK_WAIT_TIMEOUT_SECONDS='1800' copilot"
 
 reset_tmux
 COPILOT_TASK_WAIT_TIMEOUT_SECONDS= \

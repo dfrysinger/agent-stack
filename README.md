@@ -1,14 +1,14 @@
 # Agent Stack
 
-A macOS bootstrap that turns one Mac into a always-reachable host for
-running named AI agent sessions with [GitHub Copilot
+A native Windows launcher and macOS remote-host bootstrap for running named AI
+agent sessions with [GitHub Copilot
 CLI](https://github.com/github/copilot-cli), [Claude Code
 CLI](https://docs.claude.com/en/docs/claude-code), or Codex CLI. Choose a
 backend explicitly (`agent-stack copilot alpha`, `agent-stack claude alpha`,
-or `agent-stack codex alpha`) and reach it from any device (phone, tablet, another
-laptop) over [Tailscale SSH](https://tailscale.com/kb/1193/tailscale-ssh)
-and `tmux`, with [Termius](https://termius.com) as the terminal
-client.
+or `agent-stack codex alpha`). Windows runs each provider natively in an
+isolated named workspace. macOS also keeps the live TUI attachable from other
+devices over [Tailscale SSH](https://tailscale.com/kb/1193/tailscale-ssh) and
+`tmux`, with [Termius](https://termius.com) as the terminal client.
 
 The end state: tap a host in Termius on your phone, land in the same
 agent CLI conversation your laptop left mid-thought.
@@ -23,14 +23,15 @@ section you need from the table of contents.
 
 1. [What you get](#what-you-get)
 2. [How many agents?](#how-many-agents)
-3. [Prerequisites](#prerequisites)
-4. [Part 1 — Server Mac setup](#part-1--server-mac-setup)
-5. [Part 2 — iPhone (Termius iOS)](#part-2--iphone-termius-ios)
-6. [Part 3 — Mac desktop (Termius)](#part-3--mac-desktop-termius)
-7. [Daily use](#daily-use)
-8. [Configuration](#configuration)
-9. [Uninstall](#uninstall)
-10. [Status & roadmap](#status--roadmap)
+3. [Native Windows setup](#native-windows-setup)
+4. [Prerequisites](#prerequisites)
+5. [Part 1 — Server Mac setup](#part-1--server-mac-setup)
+6. [Part 2 — iPhone (Termius iOS)](#part-2--iphone-termius-ios)
+7. [Part 3 — Mac desktop (Termius)](#part-3--mac-desktop-termius)
+8. [Daily use](#daily-use)
+9. [Configuration](#configuration)
+10. [Uninstall](#uninstall)
+11. [Status & roadmap](#status--roadmap)
 
 ---
 
@@ -89,6 +90,55 @@ non-option name without `/` and prepends `agent-` to derive a workspace director
 Names are **case-sensitive end-to-end** (`tmux` session, workspace
 directory, Copilot CLI session name all match exactly what you type).
 Pick a casing convention and stick with it. Lowercase is what we use.
+
+## Native Windows setup
+
+Windows uses native PowerShell and `.cmd` launchers. It does not require WSL,
+tmux, or Git Bash at runtime.
+
+Install the provider CLIs:
+
+```powershell
+winget install --id Anthropic.ClaudeCode --exact --source winget
+winget install --id OpenAI.Codex --exact --source winget
+```
+
+GitHub Copilot CLI must also be installed and available as `copilot`.
+
+Install Agent Stack from the checkout:
+
+```powershell
+git clone https://github.com/dfrysinger/agent-stack `
+  "$HOME\code\agent-stack"
+Set-Location "$HOME\code\agent-stack"
+pwsh -NoProfile -File .\install.ps1 -Machine surface-pro
+```
+
+Use your stable lowercase mailbox machine name instead of `surface-pro`.
+The installer creates separate roots under
+`%USERPROFILE%\agent-workspaces\{copilot,claude,codex}`.
+
+Open a new PowerShell window after installing CLIs, then launch:
+
+```powershell
+agent-stack copilot alpha
+agent-stack claude alpha
+agent-stack codex alpha
+```
+
+Windows resumes durable provider conversations after the process exits. It
+does not keep a TUI alive after its terminal closes. A second Agent Stack-owned
+command for the same provider conversation is refused while the first is
+running, including across desktop and OpenSSH sessions.
+
+If `%USERPROFILE%\bin\copilot-agent.cmd` already contains the compatible
+deterministic mailbox launcher, installation preserves it. That external
+command keeps its existing working-directory, allow-all, and mailbox behavior;
+do not run it concurrently with `agent-stack copilot` for the same name.
+
+Claude and Codex authentication remains provider-controlled. Complete browser
+login, SSO, MFA, or device authorization directly in their TUI. Windows does
+not claim automatic mailbox identity or immediate wakeup for Claude or Codex.
 
 ## Prerequisites
 
@@ -699,8 +749,21 @@ SCREEN_SHARING_HOURS="1"                                           # automatic b
 # CLAUDE_BIN="claude"
 # CODEX_BIN="codex"
 # AGENT_DIR_PREFIX="agent-"
+# MAILBOX_SCRIPTS_DIR="/absolute/path/to/skills/mailbox/scripts"
 # SESSION_WARN_MB="300"
 ```
+
+On Windows, data-only configuration lives separately at:
+
+```text
+%USERPROFILE%\.config\remote-agent-stack\config.windows.json
+```
+
+Environment values override the corresponding JSON properties. Windows
+supports the three workspace roots and binaries, `AGENT_DIR_PREFIX`,
+`ALLOW_ALL`, `MAILBOX_INTEGRATION`, `MAILBOX_SCRIPTS_DIR`, and
+`COPILOT_AGENT_MACHINE`. The file is parsed as JSON and is never executed as
+PowerShell.
 
 The three `*_WORKSPACE_BASE` values are whatever you
 picked at install time (Dropbox defaults if Dropbox is installed,
@@ -712,15 +775,32 @@ option or edit the file directly to move a
 root.
 
 `MAILBOX_INTEGRATION` enables the cross-session
-[mailbox](https://github.com/dfrysinger/skills) skill — the wrapper pokes the
-recipient's pane on attach + cold-start when pending mail exists. Off
+[mailbox](https://github.com/dfrysinger/skills) skill. Copilot uses its session
+control API. Claude uses an authenticated SessionStart child when the installed
+mailbox scripts support it. If native delivery is unavailable, Agent Stack
+keeps the guarded tmux fallback and prints upgrade guidance. The setting is off
 unless you have the skill installed.
+
+For a mailbox-enabled Claude launch, Agent Stack also sets
+`crossSessionInbound` to `accept` in that launch's inline `--settings` JSON.
+Claude otherwise holds an unclassified watcher message when the receiving
+session skips permission prompts. This grant applies to every Claude peer that
+the provider accepts for that one session, not only the mailbox watcher. Agent
+Stack does not write user, project, local, or managed Claude settings, and a
+stricter managed `hold` or `refuse` policy still wins.
+
+`MAILBOX_SCRIPTS_DIR` selects an exact mailbox scripts directory. Normal
+installations discover the scripts automatically; this setting is useful for a
+local or staged Skills candidate.
 
 `ALLOW_ALL` makes the wrapper skip permission prompts on new-session
 launch — Copilot: `--allow-all` (auto-approves tools, paths, URLs);
-Claude Code: `--dangerously-skip-permissions`; Codex:
-`--dangerously-bypass-approvals-and-sandbox`. Personal-machine
-convenience; do not enable in shared environments.
+Claude Code: `--dangerously-skip-permissions`; legacy Codex:
+`--dangerously-bypass-approvals-and-sandbox`. Codex rejects that flag on its
+native remote TUI path, so the mailbox watcher applies the equivalent policy
+to the exact thread before each queued mailbox turn. Interactive Codex turns
+before the first mailbox delivery retain the provider's default policy.
+Personal-machine convenience; do not enable in shared environments.
 
 `COPILOT_TASK_WAIT_TIMEOUT_SECONDS` controls how long Copilot waits for
 background shells and agents before it ends an autopilot turn. Agent Stack
@@ -831,11 +911,23 @@ rm ~/Library/LaunchAgents/com.dfrysinger.tmux-keychain-bootstrap.plist
 Homebrew packages, FDA grants, and Tailscale network state are left in
 place — see the uninstaller output for the manual cleanup commands.
 
+On Windows:
+
+```powershell
+Set-Location "$HOME\code\agent-stack"
+pwsh -NoProfile -File .\uninstall.ps1
+```
+
+Add `-PurgeWindowsConfig` to remove only Agent Stack's Windows JSON
+configuration and install receipt. Provider workspaces, conversations,
+authentication, macOS configuration, and compatible external commands remain.
+
 ## Status & roadmap
 
-Single-machine, single-user, macOS arm64. Tested on macOS Tahoe.
-Copilot CLI, Claude Code CLI, and Codex CLI are first-class named-session
-backends. Linux support remains an
+Single-user native Windows and single-machine macOS arm64. Windows uses
+provider-owned durable resume; macOS adds live tmux reattachment. Copilot CLI,
+Claude Code CLI, and Codex CLI are first-class named-session backends on both.
+Linux support remains an
 [open issue](https://github.com/dfrysinger/agent-stack/issues).
 
 ## Other docs
